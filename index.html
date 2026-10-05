@@ -1,0 +1,121 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#0b1226">
+  <title>Дружеский турнир NHL</title>
+  <link rel="preconnect" href="https://api-web.nhle.com">
+  <link rel="preconnect" href="https://assets.nhle.com">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <!-- Лоадер: показывается, пока данные загружаются из API -->
+  <div id="loader" class="loader" role="status" aria-live="polite">
+    <div class="loader__puck"></div>
+    <p>Загружаем данные NHL…</p>
+  </div>
+
+  <header class="hero">
+    <div class="container hero__inner">
+      <div>
+        <h1 class="hero__title">🏒 Дружеский турнир <span>NHL</span></h1>
+        <p class="hero__subtitle" id="season-label">Регулярный чемпионат</p>
+      </div>
+      <div class="hero__actions">
+        <span class="hero__updated" id="updated-at"></span>
+        <button class="btn" id="refresh-btn" type="button">⟳ Обновить</button>
+      </div>
+    </div>
+  </header>
+
+  <main class="container">
+    <!-- Глобальное сообщение об ошибке -->
+    <div id="error-banner" class="error-banner" role="alert" hidden>
+      <div>
+        <strong>Не удалось загрузить данные.</strong>
+        <span id="error-text">API NHL недоступно. Проверьте соединение и попробуйте снова.</span>
+      </div>
+      <button class="btn btn--danger" id="retry-btn" type="button">Повторить</button>
+    </div>
+
+    <!-- Блок 1: мини-лидерборд -->
+    <section class="card" aria-labelledby="h-tournament">
+      <h2 class="card__title" id="h-tournament">🏆 Наш турнир</h2>
+      <div class="table-wrap">
+        <table class="table" id="tournament-table">
+          <thead>
+            <tr>
+              <th class="num">#</th>
+              <th>Участник</th>
+              <th>Команда</th>
+              <th class="num">GP</th>
+              <th class="num">PTS</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+      <p class="note">Сортировка: очки → меньше игр → победы в основное время (RW) → RW+OT → всего побед → разница шайб.</p>
+    </section>
+
+    <!-- Блоки 2 и 3: таблицы конференций -->
+    <div class="grid-2">
+      <section class="card" aria-labelledby="h-east">
+        <h2 class="card__title" id="h-east">Восточная конференция</h2>
+        <div class="table-wrap">
+          <table class="table table--conf" id="east-table">
+            <thead>
+              <tr>
+                <th class="num">#</th><th>Команда</th>
+                <th class="num">GP</th><th class="num">W</th><th class="num">L</th>
+                <th class="num">OT</th><th class="num">PTS</th><th class="num">DIFF</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="card" aria-labelledby="h-west">
+        <h2 class="card__title" id="h-west">Западная конференция</h2>
+        <div class="table-wrap">
+          <table class="table table--conf" id="west-table">
+            <thead>
+              <tr>
+                <th class="num">#</th><th>Команда</th>
+                <th class="num">GP</th><th class="num">W</th><th class="num">L</th>
+                <th class="num">OT</th><th class="num">PTS</th><th class="num">DIFF</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </section>
+    </div>
+
+    <!-- Блок 4: топ бомбардиров -->
+    <section class="card" aria-labelledby="h-scorers">
+      <h2 class="card__title" id="h-scorers">🎯 Топ бомбардиров NHL</h2>
+      <p class="inline-error" id="scorers-error" hidden>Не удалось загрузить статистику игроков.</p>
+      <div class="table-wrap">
+        <table class="table" id="scorers-table">
+          <thead>
+            <tr>
+              <th class="num">#</th><th>Игрок</th><th>Команда</th>
+              <th class="num">GP</th><th class="num">G</th><th class="num">A</th><th class="num">PTS</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+
+  <footer class="footer container">
+    Данные: открытое API NHL (api-web.nhle.com). Обновляются автоматически раз в 2 минуты.
+  </footer>
+
+  <script src="app.js"></script>
+</body>
+</html>

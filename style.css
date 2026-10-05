@@ -1,0 +1,267 @@
+/* ==========================================================================
+   Дружеский турнир NHL — стили
+   Тёмная тема + glassmorphism, mobile-first адаптивность
+   ========================================================================== */
+
+/* ---------- Переменные дизайна ---------- */
+:root {
+  --bg-1: #0b1226;
+  --bg-2: #101a38;
+  --text: #e8ecf8;
+  --text-muted: #9aa6c7;
+  --accent: #38e1ff;            /* неоновый циан для выделения */
+  --accent-soft: rgba(56, 225, 255, 0.14);
+  --glass-bg: rgba(255, 255, 255, 0.06);
+  --glass-border: rgba(255, 255, 255, 0.12);
+  --row-hover: rgba(255, 255, 255, 0.05);
+  --danger: #ff5d73;
+  --radius: 18px;
+  --shadow: 0 10px 40px rgba(0, 0, 0, 0.35);
+}
+
+/* ---------- База ---------- */
+* { box-sizing: border-box; }
+
+html { -webkit-text-size-adjust: 100%; }
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  color: var(--text);
+  font-family: "Inter", "Segoe UI", system-ui, -apple-system, Roboto, sans-serif;
+  line-height: 1.5;
+  /* Глубокий синий градиент с «световыми пятнами» для эффекта стекла */
+  background:
+    radial-gradient(900px 500px at 10% -10%, rgba(56, 225, 255, 0.16), transparent 60%),
+    radial-gradient(800px 500px at 100% 10%, rgba(140, 90, 255, 0.16), transparent 60%),
+    linear-gradient(160deg, var(--bg-1), var(--bg-2));
+  background-attachment: fixed;
+}
+
+.container {
+  width: 100%;
+  max-width: 1280px;
+  margin: 0 auto;
+  padding: 0 16px;
+}
+
+[hidden] { display: none !important; }
+
+/* ---------- Шапка ---------- */
+.hero { padding: 28px 0 8px; }
+
+.hero__inner {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.hero__title {
+  margin: 0;
+  font-size: clamp(1.6rem, 5vw, 2.4rem);
+  font-weight: 800;
+  letter-spacing: -0.02em;
+}
+.hero__title span { color: var(--accent); text-shadow: 0 0 18px rgba(56, 225, 255, 0.55); }
+
+.hero__subtitle { margin: 4px 0 0; color: var(--text-muted); }
+
+.hero__actions { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.hero__updated { font-size: 0.85rem; color: var(--text-muted); }
+
+/* ---------- Кнопки ---------- */
+.btn {
+  appearance: none;
+  border: 1px solid var(--glass-border);
+  background: var(--glass-bg);
+  color: var(--text);
+  padding: 8px 16px;
+  border-radius: 999px;
+  font: inherit;
+  font-size: 0.9rem;
+  cursor: pointer;
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  transition: border-color .2s, box-shadow .2s, transform .1s;
+}
+.btn:hover { border-color: var(--accent); box-shadow: 0 0 14px rgba(56, 225, 255, 0.35); }
+.btn:active { transform: scale(0.97); }
+.btn:disabled { opacity: .5; cursor: progress; }
+.btn--danger { border-color: rgba(255, 93, 115, .6); }
+.btn--danger:hover { border-color: var(--danger); box-shadow: 0 0 14px rgba(255, 93, 115, .4); }
+
+/* ---------- Карточки (glassmorphism) ---------- */
+.card {
+  margin: 20px 0;
+  padding: 20px;
+  background: var(--glass-bg);
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  backdrop-filter: blur(18px) saturate(140%);
+  -webkit-backdrop-filter: blur(18px) saturate(140%);
+  min-width: 0; /* позволяет grid-ячейке сжиматься и включать скролл таблицы */
+}
+
+.card__title { margin: 0 0 14px; font-size: 1.2rem; font-weight: 700; }
+
+/* Две таблицы конференций рядом на широких экранах */
+.grid-2 { display: grid; grid-template-columns: 1fr; gap: 0 20px; }
+@media (min-width: 1100px) {
+  .grid-2 { grid-template-columns: 1fr 1fr; }
+}
+
+.note { margin: 12px 0 0; font-size: 0.78rem; color: var(--text-muted); }
+
+/* ---------- Таблицы ---------- */
+/* Обёртка даёт горизонтальный скролл на узких экранах */
+.table-wrap {
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+  border-radius: 12px;
+}
+
+.table {
+  width: 100%;
+  border-collapse: separate;
+  border-spacing: 0;
+  font-size: 0.92rem;
+  white-space: nowrap;
+}
+
+.table th,
+.table td { padding: 10px 12px; text-align: left; }
+
+.table th {
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-muted);
+  font-weight: 600;
+  border-bottom: 1px solid var(--glass-border);
+}
+
+.table td { border-bottom: 1px solid rgba(255, 255, 255, 0.05); }
+.table tbody tr:last-child td { border-bottom: 0; }
+.table tbody tr:hover { background: var(--row-hover); }
+
+.table .num { text-align: center; font-variant-numeric: tabular-nums; }
+.table td.pts { font-weight: 700; color: var(--accent); }
+.diff-pos { color: #5dffa0; }
+.diff-neg { color: var(--danger); }
+
+/* Ячейка с логотипом и названием */
+.team {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  vertical-align: middle;
+}
+.team img { width: 28px; height: 28px; object-fit: contain; flex: none; }
+
+/* Бейдж с именем участника */
+.badge {
+  display: inline-block;
+  padding: 1px 9px;
+  border-radius: 999px;
+  font-size: 0.72rem;
+  font-weight: 700;
+  color: var(--accent);
+  background: var(--accent-soft);
+  border: 1px solid rgba(56, 225, 255, 0.5);
+}
+
+/* Выделение строк участников: неоновое свечение и акцентная полоса слева */
+.table tr.is-ours {
+  background: linear-gradient(90deg, rgba(56, 225, 255, 0.2), rgba(56, 225, 255, 0.05));
+}
+.table tr.is-ours td { border-bottom-color: rgba(56, 225, 255, 0.25); }
+.table tr.is-ours td:first-child {
+  box-shadow: inset 4px 0 0 var(--accent), inset 18px 0 24px -18px var(--accent);
+  font-weight: 700;
+}
+.table tr.is-ours .team-name { font-weight: 700; }
+
+/* Медали в мини-лидерборде */
+.place { font-weight: 800; }
+.place--1 { color: #ffd54a; text-shadow: 0 0 10px rgba(255, 213, 74, .6); }
+.place--2 { color: #d5dbea; }
+.place--3 { color: #e0955a; }
+
+/* ---------- Ошибки ---------- */
+.error-banner {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 20px 0;
+  padding: 16px 20px;
+  border-radius: var(--radius);
+  background: rgba(255, 93, 115, 0.12);
+  border: 1px solid rgba(255, 93, 115, 0.5);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+}
+
+.inline-error {
+  margin: 0 0 12px;
+  padding: 10px 14px;
+  border-radius: 12px;
+  color: #ffc2cb;
+  background: rgba(255, 93, 115, 0.12);
+  border: 1px solid rgba(255, 93, 115, 0.4);
+}
+
+.empty { text-align: center; color: var(--text-muted); padding: 24px 12px !important; }
+
+/* ---------- Лоадер ---------- */
+.loader {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 16px;
+  background: rgba(11, 18, 38, 0.85);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  color: var(--text-muted);
+  transition: opacity .3s;
+}
+.loader.is-hidden { opacity: 0; pointer-events: none; }
+
+.loader__puck {
+  width: 48px;
+  height: 48px;
+  border-radius: 50%;
+  border: 4px solid rgba(255, 255, 255, 0.12);
+  border-top-color: var(--accent);
+  animation: spin 0.9s linear infinite;
+  filter: drop-shadow(0 0 8px rgba(56, 225, 255, .6));
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* ---------- Подвал ---------- */
+.footer { padding-top: 8px; padding-bottom: 32px; text-align: center; font-size: 0.8rem; color: var(--text-muted); }
+
+/* ---------- Мобильные устройства ---------- */
+@media (max-width: 600px) {
+  .container { padding: 0 10px; }
+  .card { padding: 14px 10px; margin: 14px 0; border-radius: 14px; }
+  .table { font-size: 0.85rem; }
+  .table th, .table td { padding: 9px 8px; }
+  .team img { width: 24px; height: 24px; }
+  /* Таблицы конференций шире экрана — включается горизонтальный скролл */
+  .table--conf { min-width: 520px; }
+}
+
+/* Уважаем настройку «уменьшить анимации» */
+@media (prefers-reduced-motion: reduce) {
+  .loader__puck { animation-duration: 2.5s; }
+  * { transition: none !important; }
+}
