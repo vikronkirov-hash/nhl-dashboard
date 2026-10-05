@@ -4,22 +4,22 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="theme-color" content="#0b1226">
-  <title>Дружеский турнир NHL</title>
-  <link rel="preconnect" href="https://api-web.nhle.com">
+  <title>Спортивный дашборд: NHL, NBA, Лига чемпионов</title>
   <link rel="preconnect" href="https://assets.nhle.com">
+  <link rel="preconnect" href="https://a.espncdn.com">
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
   <!-- Лоадер: показывается, пока данные загружаются из API -->
   <div id="loader" class="loader" role="status" aria-live="polite">
     <div class="loader__puck"></div>
-    <p>Загружаем данные NHL…</p>
+    <p>Загружаем данные…</p>
   </div>
 
   <header class="hero">
     <div class="container hero__inner">
       <div>
-        <h1 class="hero__title">🏒 Дружеский турнир <span>NHL</span></h1>
+        <h1 class="hero__title">🏆 Спортивный <span>дашборд</span></h1>
         <p class="hero__subtitle" id="season-label">Регулярный чемпионат</p>
       </div>
       <div class="hero__actions">
@@ -29,63 +29,100 @@
     </div>
   </header>
 
+  <!-- Вкладки лиг -->
+  <div class="tabs-bar">
+    <div class="container">
+      <div class="tabs" role="tablist" aria-label="Выбор лиги">
+        <button class="tab" role="tab" id="tab-nhl" data-league="nhl" aria-controls="panel-nhl" aria-selected="true">
+          <span class="tab__icon" aria-hidden="true">🏒</span> NHL
+        </button>
+        <button class="tab" role="tab" id="tab-nba" data-league="nba" aria-controls="panel-nba" aria-selected="false" tabindex="-1">
+          <span class="tab__icon" aria-hidden="true">🏀</span> NBA
+        </button>
+        <button class="tab" role="tab" id="tab-ucl" data-league="ucl" aria-controls="panel-ucl" aria-selected="false" tabindex="-1">
+          <span class="tab__icon" aria-hidden="true">⚽</span> Champions League
+        </button>
+      </div>
+    </div>
+  </div>
+
   <main class="container">
-    <!-- Глобальное сообщение об ошибке -->
+    <!-- Сообщение об ошибке для активной лиги -->
     <div id="error-banner" class="error-banner" role="alert" hidden>
       <div>
         <strong>Не удалось загрузить данные.</strong>
-        <span id="error-text">API NHL недоступно. Проверьте соединение и попробуйте снова.</span>
+        <span id="error-text">API недоступно. Проверьте соединение и попробуйте снова.</span>
       </div>
       <button class="btn btn--danger" id="retry-btn" type="button">Повторить</button>
     </div>
 
-    <!-- Блок 1: мини-лидерборд -->
-    <section class="card" aria-labelledby="h-tournament">
-      <h2 class="card__title" id="h-tournament">🏆 Наш турнир</h2>
-      <div class="table-wrap">
-        <table class="table" id="tournament-table">
-          <thead>
-            <tr>
-              <th class="num">#</th>
-              <th>Участник</th>
-              <th>Команда</th>
-              <th class="num">GP</th>
-              <th class="num">PTS</th>
-            </tr>
-          </thead>
-          <tbody></tbody>
-        </table>
-      </div>
-      <p class="note">Нажмите на строку, чтобы увидеть подробности. Сортировка: очки → меньше игр → победы в основное время (RW) → RW+OT → всего побед → разница шайб.</p>
-    </section>
-
-    <!-- Блоки 2 и 3: таблицы конференций -->
-    <div class="grid-2">
-      <section class="card" aria-labelledby="h-east">
-        <h2 class="card__title" id="h-east">Восточная конференция</h2>
+    <!-- ===================== NHL ===================== -->
+    <div class="panel" id="panel-nhl" role="tabpanel" aria-labelledby="tab-nhl">
+      <!-- Блок 1: мини-лидерборд дружеского турнира -->
+      <section class="card" aria-labelledby="h-tournament">
+        <h2 class="card__title" id="h-tournament">🏆 Наш турнир</h2>
         <div class="table-wrap">
-          <table class="table table--conf" id="east-table">
+          <table class="table" id="tournament-table">
             <thead>
               <tr>
-                <th class="num">#</th><th>Команда</th>
-                <th class="num">GP</th><th class="num">W</th><th class="num">L</th>
-                <th class="num">OT</th><th class="num">PTS</th><th class="num">DIFF</th>
+                <th class="num">#</th>
+                <th>Участник</th>
+                <th>Команда</th>
+                <th class="num">GP</th>
+                <th class="num">PTS</th>
               </tr>
             </thead>
             <tbody></tbody>
           </table>
         </div>
+        <p class="note">Нажмите на строку, чтобы увидеть подробности. Сортировка: очки → меньше игр → победы в основное время (RW) → RW+OT → всего побед → разница шайб.</p>
       </section>
 
-      <section class="card" aria-labelledby="h-west">
-        <h2 class="card__title" id="h-west">Западная конференция</h2>
+      <!-- Блоки 2 и 3: таблицы конференций -->
+      <div class="grid-2">
+        <section class="card" aria-labelledby="h-east">
+          <h2 class="card__title" id="h-east">Восточная конференция</h2>
+          <div class="table-wrap">
+            <table class="table table--conf" id="east-table">
+              <thead>
+                <tr>
+                  <th class="num">#</th><th>Команда</th>
+                  <th class="num">GP</th><th class="num">W</th><th class="num">L</th>
+                  <th class="num">OT</th><th class="num">PTS</th><th class="num">DIFF</th>
+                </tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </section>
+
+        <section class="card" aria-labelledby="h-west">
+          <h2 class="card__title" id="h-west">Западная конференция</h2>
+          <div class="table-wrap">
+            <table class="table table--conf" id="west-table">
+              <thead>
+                <tr>
+                  <th class="num">#</th><th>Команда</th>
+                  <th class="num">GP</th><th class="num">W</th><th class="num">L</th>
+                  <th class="num">OT</th><th class="num">PTS</th><th class="num">DIFF</th>
+                </tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </section>
+      </div>
+
+      <!-- Блок 4: топ бомбардиров -->
+      <section class="card" aria-labelledby="h-scorers">
+        <h2 class="card__title" id="h-scorers">🎯 Топ бомбардиров NHL</h2>
+        <p class="inline-error" id="scorers-error" hidden>Не удалось загрузить статистику игроков.</p>
         <div class="table-wrap">
-          <table class="table table--conf" id="west-table">
+          <table class="table" id="scorers-table">
             <thead>
               <tr>
-                <th class="num">#</th><th>Команда</th>
-                <th class="num">GP</th><th class="num">W</th><th class="num">L</th>
-                <th class="num">OT</th><th class="num">PTS</th><th class="num">DIFF</th>
+                <th class="num">#</th><th>Игрок</th><th>Команда</th>
+                <th class="num">GP</th><th class="num">G</th><th class="num">A</th><th class="num">PTS</th>
               </tr>
             </thead>
             <tbody></tbody>
@@ -94,29 +131,112 @@
       </section>
     </div>
 
-    <!-- Блок 4: топ бомбардиров -->
-    <section class="card" aria-labelledby="h-scorers">
-      <h2 class="card__title" id="h-scorers">🎯 Топ бомбардиров NHL</h2>
-      <p class="inline-error" id="scorers-error" hidden>Не удалось загрузить статистику игроков.</p>
-      <div class="table-wrap">
-        <table class="table" id="scorers-table">
-          <thead>
-            <tr>
-              <th class="num">#</th><th>Игрок</th><th>Команда</th>
-              <th class="num">GP</th><th class="num">G</th><th class="num">A</th><th class="num">PTS</th>
-            </tr>
-          </thead>
-          <tbody></tbody>
-        </table>
+    <!-- ===================== NBA ===================== -->
+    <div class="panel" id="panel-nba" role="tabpanel" aria-labelledby="tab-nba" hidden>
+      <p class="league-note" id="nba-note" hidden></p>
+
+      <div class="grid-2">
+        <section class="card" aria-labelledby="h-nba-east">
+          <h2 class="card__title" id="h-nba-east">Восточная конференция</h2>
+          <div class="table-wrap">
+            <table class="table table--conf table--wide" id="nba-east-table">
+              <thead>
+                <tr>
+                  <th class="num">#</th><th>Команда</th>
+                  <th class="num">GP</th><th class="num">W</th><th class="num">L</th>
+                  <th class="num">PCT</th><th class="num">GB</th><th class="num">DIFF</th>
+                  <th class="num">L10</th><th class="num">STRK</th>
+                </tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </section>
+
+        <section class="card" aria-labelledby="h-nba-west">
+          <h2 class="card__title" id="h-nba-west">Западная конференция</h2>
+          <div class="table-wrap">
+            <table class="table table--conf table--wide" id="nba-west-table">
+              <thead>
+                <tr>
+                  <th class="num">#</th><th>Команда</th>
+                  <th class="num">GP</th><th class="num">W</th><th class="num">L</th>
+                  <th class="num">PCT</th><th class="num">GB</th><th class="num">DIFF</th>
+                  <th class="num">L10</th><th class="num">STRK</th>
+                </tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </section>
       </div>
-    </section>
+
+      <section class="card" aria-labelledby="h-nba-scorers">
+        <h2 class="card__title" id="h-nba-scorers">🎯 Лучшие снайперы NBA <small class="card__hint">по очкам за игру</small></h2>
+        <p class="inline-error" id="nba-scorers-error" hidden>Не удалось загрузить статистику игроков.</p>
+        <div class="table-wrap">
+          <table class="table" id="nba-scorers-table">
+            <thead>
+              <tr>
+                <th class="num">#</th><th>Игрок</th><th>Команда</th>
+                <th class="num">GP</th><th class="num">PPG</th><th class="num">REB</th>
+                <th class="num">AST</th><th class="num">PTS</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </section>
+    </div>
+
+    <!-- ===================== Лига чемпионов ===================== -->
+    <div class="panel" id="panel-ucl" role="tabpanel" aria-labelledby="tab-ucl" hidden>
+      <p class="league-note" id="ucl-note" hidden></p>
+
+      <section class="card" aria-labelledby="h-ucl-table">
+        <h2 class="card__title" id="h-ucl-table">Турнирная таблица: этап лиги</h2>
+        <div class="table-wrap">
+          <table class="table table--conf table--wide" id="ucl-table">
+            <thead>
+              <tr>
+                <th class="num">#</th><th>Команда</th>
+                <th class="num">GP</th><th class="num">W</th><th class="num">D</th><th class="num">L</th>
+                <th class="num">G</th><th class="num">DIFF</th><th class="num">PTS</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+        <ul class="legend">
+          <li><i class="legend__dot zone-top"></i> 1–8: сразу в 1/8 финала</li>
+          <li><i class="legend__dot zone-mid"></i> 9–24: стыковые матчи</li>
+          <li><i class="legend__dot zone-out"></i> 25–36: выбывают</li>
+        </ul>
+      </section>
+
+      <section class="card" aria-labelledby="h-ucl-scorers">
+        <h2 class="card__title" id="h-ucl-scorers">🎯 Лучшие бомбардиры Лиги чемпионов</h2>
+        <p class="inline-error" id="ucl-scorers-error" hidden>Не удалось загрузить статистику игроков.</p>
+        <div class="table-wrap">
+          <table class="table" id="ucl-scorers-table">
+            <thead>
+              <tr>
+                <th class="num">#</th><th>Игрок</th><th>Команда</th>
+                <th class="num">Матчи</th><th class="num">Голы</th><th class="num">Пасы</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </section>
+    </div>
   </main>
 
   <footer class="footer container">
-    Данные: открытое API NHL (api-web.nhle.com). Обновляются автоматически раз в 2 минуты.
+    Данные: открытое API NHL (api-web.nhle.com) и ESPN (NBA, Лига чемпионов). Активная вкладка обновляется автоматически раз в 2 минуты.
   </footer>
 
-  <!-- Модальное окно (карточка команды / игрока). Содержимое строится в app.js -->
+  <!-- Модальное окно (карточка команды / игрока NHL). Содержимое строится в app.js -->
   <div id="modal" class="modal" hidden>
     <div class="modal__dialog" role="dialog" aria-modal="true" aria-labelledby="modal-title">
       <button class="modal__close" id="modal-close" type="button" data-close aria-label="Закрыть">×</button>

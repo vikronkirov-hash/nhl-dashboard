@@ -30,8 +30,31 @@ const API = {
 };
 
 /**
- * Собственный Cloudflare Worker, проксирующий запросы к API NHL.
- * API NHL не отдаёт CORS-заголовки, поэтому браузер блокирует прямые запросы
+ * Источник данных для NBA и Лиги чемпионов — публичное API ESPN (ключ не нужен).
+ * Запросы идут через тот же воркер, что и для NHL (см. viaWorker).
+ */
+const ESPN = {
+  // Таблица НБА: season — год окончания сезона (2027 = 2026-27), seasontype=2 — регулярный сезон
+  nbaStandings: (year) =>
+    `https://site.api.espn.com/apis/v2/sports/basketball/nba/standings?season=${year}&seasontype=2`,
+  // Лучшие игроки НБА по среднему количеству очков за игру
+  nbaLeaders: (year) =>
+    'https://site.web.api.espn.com/apis/common/v3/sports/basketball/nba/statistics/byathlete?' +
+    new URLSearchParams({ limit: '10', sort: 'offensive.avgPoints:desc', season: String(year), seasontype: '2' }),
+  // Общая таблица этапа лиги Лиги чемпионов (текущий сезон)
+  uclStandings: 'https://site.api.espn.com/apis/v2/sports/soccer/uefa.champions/standings',
+  // Лидеры по голам этапа лиги; в ответе только ссылки на игроков, поэтому имена берём отдельно
+  uclLeaders: (year) =>
+    `https://sports.core.api.espn.com/v2/sports/soccer/leagues/uefa.champions/seasons/${year}/types/1/leaders`,
+  uclAthlete: (year, id) =>
+    `https://sports.core.api.espn.com/v2/sports/soccer/leagues/uefa.champions/seasons/${year}/athletes/${id}`,
+};
+
+const LEAGUE_STORAGE_KEY = 'sportsHub.activeLeague';
+
+/**
+ * Собственный Cloudflare Worker, проксирующий запросы к внешним API (NHL, ESPN).
+ * Эти API не отдают CORS-заголовки, поэтому браузер блокирует прямые запросы
  * (например, с GitHub Pages). Все запросы идут в виде:
  *   WORKER_URL?url=<закодированный оригинальный URL>
  */
@@ -62,6 +85,17 @@ const dom = {
   westBody: $('#west-table tbody'),
   scorersBody: $('#scorers-table tbody'),
   scorersError: $('#scorers-error'),
+  // NBA
+  nbaEastBody: $('#nba-east-table tbody'),
+  nbaWestBody: $('#nba-west-table tbody'),
+  nbaScorersBody: $('#nba-scorers-table tbody'),
+  nbaScorersError: $('#nba-scorers-error'),
+  nbaNote: $('#nba-note'),
+  // Лига чемпионов
+  uclBody: $('#ucl-table tbody'),
+  uclScorersBody: $('#ucl-scorers-table tbody'),
+  uclScorersError: $('#ucl-scorers-error'),
+  uclNote: $('#ucl-note'),
 };
 
 /* ---------- Утилиты ---------- */
@@ -300,57 +334,329 @@ async function loadScorers(seasonId) {
 
 /* ---------- Состояние UI ---------- */
 
-function setLoading(isLoading) {
-  dom.loader.classList.toggle('is-hidden', !isLoading);
-  dom.refreshBtn.disabled = isLoading;
-}
-
-function showError(message) {
-  dom.errorText.textContent = message;
-  dom.errorBanner.hidden = false;
-}
-
 function seasonLabel(seasonId) {
   const s = String(seasonId);
   return `Регулярный чемпионат ${s.slice(0, 4)}/${s.slice(4)}`;
 }
 
-/** Главная функция: загрузка → отрисовка. */
-let isLoading = false;
-async function refresh({ silent = false } = {}) {
-  if (isLoading) return;
-  isLoading = true;
-  if (!silent) setLoading(true);
-  dom.errorBanner.hidden = true;
+/**
+ * Полная загрузка вкладки NHL: загрузка → отрисовка.
+ * @param {{ready: Function}} ctx  ready() скрывает лоадер, не дожидаясь бомбардиров
+ * @returns {Promise<{subtitle: string}>}
+ */
+async function loadNhl(ctx) {
+  // 1. Турнирные таблицы (блоки 1–3)
+  const { teams, seasonId } = await loadStandings();
+  teams.forEach((t) => teamsByAbbrev.set(t.abbrev, t));
+  renderTournament(teams);
+  renderConference(dom.eastBody, teams, 'E');
+  renderConference(dom.westBody, teams, 'W');
+  ctx.ready(); // таблицы готовы — не заставляем ждать загрузку бомбардиров
+
+  // 2. Бомбардиры (блок 4) — отдельная обработка ошибки, чтобы не ломать таблицы
+  try {
+    renderScorers(await loadScorers(seasonId));
+    dom.scorersError.hidden = true;
+  } catch (scorersError) {
+    console.error(scorersError);
+    dom.scorersError.hidden = false;
+  }
+
+  return { subtitle: seasonLabel(seasonId) };
+}
+
+/* ==========================================================================
+   NBA (данные ESPN)
+   ========================================================================== */
+
+/** Словарь статистик записи ESPN: { имя: {value, displayValue} }. */
+const espnStats = (entry) => Object.fromEntries(entry.stats.map((s) => [s.name, s]));
+
+/** Логотип команды ESPN (для тёмной темы берём «dark»-вариант, если он есть). */
+const espnLogo = (team) =>
+  (team.logos?.find((l) => l.rel?.includes('dark')) ?? team.logos?.[0])?.href ?? '';
+
+/** Универсальная ячейка «логотип + название» для лиг ESPN. */
+function logoCell(logo, name) {
+  const img = logo
+    ? `<img src="${esc(logo)}" alt="" loading="lazy" width="28" height="28" data-hide-on-error>`
+    : '';
+  return `<span class="team">${img}<span class="team-name">${esc(name)}</span></span>`;
+}
+
+/**
+ * Год окончания сезона НБА, который сейчас актуален: сезон стартует в октябре,
+ * поэтому с октября это следующий календарный год (окт 2026 → 2027 = «2026-27»).
+ */
+function currentNbaSeasonYear(now = new Date()) {
+  return now.getMonth() >= 9 ? now.getFullYear() + 1 : now.getFullYear();
+}
+
+const nbaSeasonName = (year) => `${year - 1}-${String(year).slice(2)}`;
+
+/** Разбирает таблицу НБА в { E: [...], W: [...] }, отсортированную по сеяным местам. */
+function parseNbaStandings(data) {
+  const result = { E: [], W: [] };
+  for (const conf of data.children) {
+    const key = conf.abbreviation === 'East' ? 'E' : 'W';
+    result[key] = conf.standings.entries.map((entry) => {
+      const s = espnStats(entry);
+      const wins = s.wins?.value ?? 0;
+      const losses = s.losses?.value ?? 0;
+      return {
+        name: entry.team.displayName,
+        logo: espnLogo(entry.team),
+        seed: s.playoffSeed?.value ?? 99,
+        gp: wins + losses,
+        wins,
+        losses,
+        pct: s.winPercent?.displayValue ?? '—',
+        gb: s.gamesBehind?.displayValue ?? '—',
+        diff: s.pointDifferential?.value ?? 0,
+        l10: s['Last Ten Games']?.displayValue ?? '—',
+        streak: s.streak?.displayValue ?? '—',
+      };
+    }).sort((a, b) => a.seed - b.seed || b.wins - a.wins);
+  }
+  return result;
+}
+
+function renderNbaConference(tbody, rows) {
+  tbody.innerHTML = rows.map((t, i) => `
+    <tr>
+      <td class="num">${i + 1}</td>
+      <td>${logoCell(t.logo, t.name)}</td>
+      <td class="num">${t.gp}</td>
+      <td class="num">${t.wins}</td>
+      <td class="num">${t.losses}</td>
+      <td class="num pts">${esc(t.pct)}</td>
+      <td class="num">${esc(t.gb)}</td>
+      <td class="num">${formatDiff(t.diff)}</td>
+      <td class="num">${esc(t.l10)}</td>
+      <td class="num">${esc(t.streak)}</td>
+    </tr>`).join('');
+}
+
+/** Загружает таблицу НБА; если регулярный сезон ещё не начался — берёт итоги прошлого. */
+async function loadNbaStandings() {
+  const validate = (d) => {
+    if (!Array.isArray(d?.children) || d.children.length < 2) throw new Error('Пустая таблица НБА');
+  };
+
+  let year = currentNbaSeasonYear();
+  let table = parseNbaStandings(await fetchJson(ESPN.nbaStandings(year), validate));
+  let fallback = false;
+
+  const gamesPlayed = [...table.E, ...table.W].reduce((sum, t) => sum + t.gp, 0);
+  if (gamesPlayed === 0) {
+    fallback = true;
+    year -= 1;
+    table = parseNbaStandings(await fetchJson(ESPN.nbaStandings(year), validate));
+  }
+  return { table, year, fallback };
+}
+
+/** Лучшие по очкам за игру; если в сезоне ещё нет статистики — прошлый сезон. */
+async function loadNbaScorers(year) {
+  const validate = (d) => { if (!d || typeof d !== 'object') throw new Error('Пустой ответ НБА'); };
+
+  let usedYear = year;
+  let data = await fetchJson(ESPN.nbaLeaders(usedYear), validate);
+  if (!data.athletes?.length) {
+    usedYear -= 1;
+    data = await fetchJson(ESPN.nbaLeaders(usedYear), validate);
+  }
+
+  // Значения лежат в массивах по категориям; имена статистик описаны в data.categories
+  const valueOf = (item, category, stat) => {
+    const index = data.categories.find((c) => c.name === category)?.names.indexOf(stat);
+    return item.categories.find((c) => c.name === category)?.values?.[index];
+  };
+  const fixed = (v) => (typeof v === 'number' ? v.toFixed(1) : '—');
+
+  const players = (data.athletes ?? []).map((item) => ({
+    name: item.athlete.displayName,
+    team: item.athlete.teamShortName ?? '',
+    logo: item.athlete.teamLogos?.[0]?.href ?? '',
+    gp: valueOf(item, 'general', 'gamesPlayed') ?? '—',
+    ppg: fixed(valueOf(item, 'offensive', 'avgPoints')),
+    reb: fixed(valueOf(item, 'general', 'avgRebounds')),
+    ast: fixed(valueOf(item, 'offensive', 'avgAssists')),
+    pts: valueOf(item, 'offensive', 'points') ?? '—',
+  }));
+  return { players, year: usedYear };
+}
+
+function renderNbaScorers(players) {
+  dom.nbaScorersBody.innerHTML = players.length
+    ? players.map((p, i) => `
+      <tr>
+        <td class="num">${i + 1}</td>
+        <td>${esc(p.name)}</td>
+        <td>${logoCell(p.logo, p.team)}</td>
+        <td class="num">${p.gp}</td>
+        <td class="num pts">${p.ppg}</td>
+        <td class="num">${p.reb}</td>
+        <td class="num">${p.ast}</td>
+        <td class="num">${p.pts}</td>
+      </tr>`).join('')
+    : '<tr><td class="empty" colspan="8">Пока нет данных об игроках.</td></tr>';
+}
+
+async function loadNba(ctx) {
+  const { table, year, fallback } = await loadNbaStandings();
+  renderNbaConference(dom.nbaEastBody, table.E);
+  renderNbaConference(dom.nbaWestBody, table.W);
+  ctx.ready();
+
+  let note = fallback
+    ? `Регулярный сезон ${nbaSeasonName(year + 1)} ещё не начался — показаны итоги сезона ${nbaSeasonName(year)}.`
+    : '';
 
   try {
-    // 1. Турнирные таблицы (блоки 1–3)
-    const { teams, seasonId } = await loadStandings();
-    teams.forEach((t) => teamsByAbbrev.set(t.abbrev, t));
-    renderTournament(teams);
-    renderConference(dom.eastBody, teams, 'E');
-    renderConference(dom.westBody, teams, 'W');
-    dom.seasonLabel.textContent = seasonLabel(seasonId);
-    setLoading(false); // таблицы готовы — не заставляем ждать загрузку бомбардиров
-
-    // 2. Бомбардиры (блок 4) — отдельная обработка ошибки, чтобы не ломать таблицы
-    try {
-      renderScorers(await loadScorers(seasonId));
-      dom.scorersError.hidden = true;
-    } catch (scorersError) {
-      console.error(scorersError);
-      dom.scorersError.hidden = false;
+    const scorers = await loadNbaScorers(year);
+    renderNbaScorers(scorers.players);
+    dom.nbaScorersError.hidden = true;
+    // Бывает, что таблица уже текущая, а статистика игроков ещё прошлого сезона
+    if (scorers.year !== year) {
+      note = `Статистика игроков пока за сезон ${nbaSeasonName(scorers.year)}: в новом сезоне ещё нет сыгранных матчей.`;
     }
-
-    dom.updatedAt.textContent = `Обновлено: ${new Date().toLocaleTimeString('ru-RU')}`;
   } catch (error) {
     console.error(error);
-    const reason = error.name === 'AbortError' ? 'Превышено время ожидания ответа.' : 'API NHL недоступно.';
-    showError(`${reason} Проверьте соединение и попробуйте снова.`);
-  } finally {
-    isLoading = false;
-    setLoading(false);
+    dom.nbaScorersError.hidden = false;
   }
+
+  dom.nbaNote.textContent = note;
+  dom.nbaNote.hidden = !note;
+  return { subtitle: `${fallback ? 'Итоги сезона' : 'Регулярный сезон'} NBA ${nbaSeasonName(year)}` };
+}
+
+/* ==========================================================================
+   Лига чемпионов УЕФА (данные ESPN)
+   ========================================================================== */
+
+/** Зона турнирной таблицы этапа лиги (формат 36 команд). */
+const uclZone = (rank) => (rank <= 8 ? 'zone-top' : rank <= 24 ? 'zone-mid' : 'zone-out');
+
+/** Кэш имён игроков: в ответе лидеров только ссылки, имя берётся отдельным запросом. */
+const uclPlayerNames = new Map();
+
+function parseUclStandings(data) {
+  const entries = data.children?.[0]?.standings?.entries ?? [];
+  return entries.map((entry) => {
+    const s = espnStats(entry);
+    return {
+      id: entry.team.id,
+      name: entry.team.displayName,
+      short: entry.team.shortDisplayName ?? entry.team.displayName,
+      logo: espnLogo(entry.team),
+      rank: s.rank?.value ?? 99,
+      gp: s.gamesPlayed?.value ?? 0,
+      wins: s.wins?.value ?? 0,
+      draws: s.ties?.value ?? 0,
+      losses: s.losses?.value ?? 0,
+      gf: s.pointsFor?.value ?? 0,
+      ga: s.pointsAgainst?.value ?? 0,
+      diff: s.pointDifferential?.value ?? 0,
+      points: s.points?.value ?? 0,
+    };
+  }).sort((a, b) => a.rank - b.rank);
+}
+
+function renderUclTable(teams) {
+  dom.uclBody.innerHTML = teams.map((t) => `
+    <tr class="${uclZone(t.rank)}">
+      <td class="num">${t.rank}</td>
+      <td>${logoCell(t.logo, t.name)}</td>
+      <td class="num">${t.gp}</td>
+      <td class="num">${t.wins}</td>
+      <td class="num">${t.draws}</td>
+      <td class="num">${t.losses}</td>
+      <td class="num">${t.gf}:${t.ga}</td>
+      <td class="num">${formatDiff(t.diff)}</td>
+      <td class="num pts">${t.points}</td>
+    </tr>`).join('');
+}
+
+/** Имя игрока по ссылке ESPN; при сбое показываем запасной вариант, а не роняем всю таблицу. */
+async function uclPlayerName(year, id) {
+  if (uclPlayerNames.has(id)) return uclPlayerNames.get(id);
+  try {
+    const athlete = await fetchJson(ESPN.uclAthlete(year, id), (d) => { if (!d?.displayName) throw new Error('bad athlete'); });
+    uclPlayerNames.set(id, athlete.displayName);
+    return athlete.displayName;
+  } catch (error) {
+    console.warn(`Не удалось получить имя игрока ${id}:`, error);
+    return `Игрок #${id}`;
+  }
+}
+
+async function loadUclScorers(year, teams) {
+  const data = await fetchJson(ESPN.uclLeaders(year), (d) => {
+    if (!Array.isArray(d?.categories)) throw new Error('Некорректный ответ лидеров ЛЧ');
+  });
+  const goals = data.categories.find((c) => c.name === 'goalsLeaders')?.leaders ?? [];
+  const teamsById = new Map(teams.map((t) => [t.id, t]));
+
+  const top = goals.map((l) => {
+    // «M: 1, G: 3: A: 0» — матчи, голы, передачи
+    const [, matches = 0, g = 0, a = 0] = /M:\s*(\d+).*?G:\s*(\d+).*?A:\s*(\d+)/.exec(l.shortDisplayValue ?? '') ?? [];
+    return {
+      id: /athletes\/(\d+)/.exec(l.athlete?.$ref ?? '')?.[1],
+      teamId: /teams\/(\d+)/.exec(l.team?.$ref ?? '')?.[1],
+      matches: Number(matches),
+      goals: Number(g) || l.value || 0,
+      assists: Number(a),
+    };
+  })
+    .filter((p) => p.id)
+    .sort((a, b) => b.goals - a.goals || b.assists - a.assists || a.matches - b.matches)
+    .slice(0, TOP_SCORERS_COUNT);
+
+  const names = await Promise.all(top.map((p) => uclPlayerName(year, p.id)));
+  return top.map((p, i) => {
+    const team = teamsById.get(p.teamId);
+    return { ...p, name: names[i], teamName: team?.short ?? '—', teamLogo: team?.logo ?? '' };
+  });
+}
+
+function renderUclScorers(players) {
+  dom.uclScorersBody.innerHTML = players.length
+    ? players.map((p, i) => `
+      <tr>
+        <td class="num">${i + 1}</td>
+        <td>${esc(p.name)}</td>
+        <td>${logoCell(p.teamLogo, p.teamName)}</td>
+        <td class="num">${p.matches}</td>
+        <td class="num pts">${p.goals}</td>
+        <td class="num">${p.assists}</td>
+      </tr>`).join('')
+    : '<tr><td class="empty" colspan="6">Пока никто не забил.</td></tr>';
+}
+
+async function loadUcl(ctx) {
+  const data = await fetchJson(ESPN.uclStandings, (d) => {
+    if (!d?.children?.[0]?.standings?.entries?.length) throw new Error('Пустая таблица Лиги чемпионов');
+  });
+  const teams = parseUclStandings(data);
+  renderUclTable(teams);
+  ctx.ready();
+
+  const year = data.season?.year ?? data.children[0].standings.season;
+  const seasonYears = /\d{4}-\d{2}/.exec(data.season?.displayName ?? '')?.[0] ?? '';
+  const started = teams.some((t) => t.gp > 0);
+  dom.uclNote.textContent = started ? '' : 'Матчи этапа лиги ещё не сыграны — таблица пока в стартовом состоянии.';
+  dom.uclNote.hidden = started;
+
+  try {
+    renderUclScorers(await loadUclScorers(year, teams));
+    dom.uclScorersError.hidden = true;
+  } catch (error) {
+    console.error(error);
+    dom.uclScorersError.hidden = false;
+  }
+
+  return { subtitle: `Лига чемпионов УЕФА ${seasonYears} · этап лиги` };
 }
 
 /* ==========================================================================
@@ -753,8 +1059,8 @@ modal.root.addEventListener('keydown', (e) => {
   }
 });
 
-// Не показываем «битую» картинку, если фото игрока не загрузилось
-modal.body.addEventListener('error', (e) => {
+// Не показываем «битую» картинку (фото игрока, логотип), если она не загрузилась
+document.addEventListener('error', (e) => {
   if (e.target.matches?.('img[data-hide-on-error]')) e.target.style.visibility = 'hidden';
 }, true);
 
@@ -773,11 +1079,143 @@ document.addEventListener('keydown', (e) => {
   else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
 });
 
+/* ==========================================================================
+   Вкладки лиг: переключение, ленивая загрузка, запоминание выбора
+   ========================================================================== */
+
+/** Описание лиг: вкладка, панель, функция загрузки и собственное состояние. */
+const LEAGUES = {
+  nhl: { name: 'NHL', load: loadNhl },
+  nba: { name: 'NBA', load: loadNba },
+  ucl: { name: 'Champions League', load: loadUcl },
+};
+
+for (const [key, league] of Object.entries(LEAGUES)) {
+  league.tab = $(`#tab-${key}`);
+  league.panel = $(`#panel-${key}`);
+  league.state = {
+    loading: false,   // идёт запрос
+    ready: false,     // основные таблицы уже показаны (лоадер можно скрыть)
+    silent: false,    // фоновое обновление — без лоадера
+    loaded: false,    // данные успешно загружались хотя бы раз
+    error: '',
+    subtitle: '',
+    updatedAt: null,
+  };
+}
+
+let activeLeague = 'nhl';
+
+/** Читает/пишет localStorage безопасно (может быть недоступен, например в приватном режиме). */
+const storage = {
+  get() { try { return localStorage.getItem(LEAGUE_STORAGE_KEY); } catch { return null; } },
+  set(value) { try { localStorage.setItem(LEAGUE_STORAGE_KEY, value); } catch { /* игнорируем */ } },
+};
+
+/** Синхронизирует общие элементы (лоадер, ошибку, подзаголовок) с состоянием активной лиги. */
+function syncChrome() {
+  const { state } = LEAGUES[activeLeague];
+  dom.loader.classList.toggle('is-hidden', !(state.loading && !state.silent && !state.ready));
+  dom.refreshBtn.disabled = state.loading && !state.silent;
+  dom.errorBanner.hidden = !state.error;
+  dom.errorText.textContent = state.error;
+  dom.seasonLabel.textContent = state.subtitle || LEAGUES[activeLeague].name;
+  dom.updatedAt.textContent = state.updatedAt
+    ? `Обновлено: ${state.updatedAt.toLocaleTimeString('ru-RU')}`
+    : '';
+}
+
+/** Загрузка данных лиги (с защитой от параллельных запросов одной лиги). */
+async function refreshLeague(key, { silent = false } = {}) {
+  const league = LEAGUES[key];
+  const { state } = league;
+  if (state.loading) return;
+
+  Object.assign(state, { loading: true, ready: false, silent });
+  if (!silent) state.error = '';
+  syncChrome();
+
+  try {
+    const result = await league.load({
+      ready: () => { state.ready = true; syncChrome(); },
+    });
+    state.loaded = true;
+    state.error = '';
+    state.subtitle = result.subtitle;
+    state.updatedAt = new Date();
+  } catch (error) {
+    console.error(error);
+    // Тихое обновление не затирает уже показанные данные баннером ошибки
+    if (!(silent && state.loaded)) {
+      const reason = error.name === 'AbortError' ? 'Превышено время ожидания ответа.' : 'API недоступно.';
+      state.error = `${reason} Проверьте соединение и попробуйте снова.`;
+    }
+  } finally {
+    state.loading = false;
+    syncChrome();
+  }
+}
+
+/** Переключает вкладку: показывает нужную панель и при необходимости подгружает данные. */
+function activateLeague(key, { focus = false, persist = true } = {}) {
+  if (!LEAGUES[key]) key = 'nhl';
+  activeLeague = key;
+
+  for (const [k, league] of Object.entries(LEAGUES)) {
+    const isActive = k === key;
+    league.tab.setAttribute('aria-selected', String(isActive));
+    league.tab.tabIndex = isActive ? 0 : -1;
+    league.panel.hidden = !isActive;  // у показанной панели срабатывает CSS-анимация появления
+  }
+  if (focus) LEAGUES[key].tab.focus();
+  if (persist) {
+    storage.set(key);
+    history.replaceState(null, '', `#${key}`);
+  }
+
+  const { state } = LEAGUES[key];
+  syncChrome();
+  if (!state.loaded && !state.loading) refreshLeague(key);
+  // Вернулись на вкладку с устаревшими данными — обновляем в фоне
+  else if (state.loaded && Date.now() - state.updatedAt > AUTO_REFRESH_MS) refreshLeague(key, { silent: true });
+}
+
 /* ---------- Запуск ---------- */
 
-dom.retryBtn.addEventListener('click', () => refresh());
-dom.refreshBtn.addEventListener('click', () => refresh());
+// Клики и клавиатура (стрелки, Home/End) по вкладкам
+for (const [key, league] of Object.entries(LEAGUES)) {
+  league.tab.addEventListener('click', () => activateLeague(key));
+}
+$('.tabs').addEventListener('keydown', (e) => {
+  const keys = Object.keys(LEAGUES);
+  const index = keys.indexOf(activeLeague);
+  const target = {
+    ArrowRight: keys[(index + 1) % keys.length],
+    ArrowLeft: keys[(index - 1 + keys.length) % keys.length],
+    Home: keys[0],
+    End: keys[keys.length - 1],
+  }[e.key];
+  if (target) {
+    e.preventDefault();
+    activateLeague(target, { focus: true });
+  }
+});
 
-refresh();
-// Тихое автообновление, пока вкладка открыта
-setInterval(() => { if (!document.hidden) refresh({ silent: true }); }, AUTO_REFRESH_MS);
+dom.retryBtn.addEventListener('click', () => refreshLeague(activeLeague));
+dom.refreshBtn.addEventListener('click', () => refreshLeague(activeLeague));
+
+// Ручное изменение #hash (кнопки «назад/вперёд», закладки) тоже переключает вкладку
+window.addEventListener('hashchange', () => {
+  const key = location.hash.slice(1);
+  if (LEAGUES[key] && key !== activeLeague) activateLeague(key, { persist: false });
+});
+
+// Стартовая вкладка: ссылка с #nba → последняя выбранная (localStorage) → NHL
+const hashKey = location.hash.slice(1);
+const savedKey = storage.get();
+activateLeague(LEAGUES[hashKey] ? hashKey : LEAGUES[savedKey] ? savedKey : 'nhl');
+
+// Тихое автообновление активной вкладки, пока страница открыта
+setInterval(() => {
+  if (!document.hidden) refreshLeague(activeLeague, { silent: true });
+}, AUTO_REFRESH_MS);
