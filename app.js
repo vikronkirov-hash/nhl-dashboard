@@ -27,19 +27,19 @@ const API = {
 };
 
 /**
- * Способы получить данные: первый — прямой запрос, остальные — публичные CORS-прокси.
- * Прокси бесплатные и могут быть перегружены, поэтому их несколько; при желании
- * замените на свой (например, Cloudflare Worker).
+ * Собственный Cloudflare Worker, проксирующий запросы к API NHL.
+ * API NHL не отдаёт CORS-заголовки, поэтому браузер блокирует прямые запросы
+ * (например, с GitHub Pages). Все запросы идут в виде:
+ *   WORKER_URL?url=<закодированный оригинальный URL>
  */
-const ROUTES = [
-  (url) => url,
-  (url) => `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`,
-  (url) => `https://corsproxy.io/?url=${encodeURIComponent(url)}`,
-  (url) => `https://api.codetabs.com/v1/proxy/?quest=${encodeURIComponent(url)}`,
-];
+const WORKER_URL = 'https://nhl-proxy.vikronkirov.workers.dev/';
 
+/** Оборачивает URL API NHL в запрос к воркеру. */
+const viaWorker = (url) => `${WORKER_URL}?url=${encodeURIComponent(url)}`;
+
+const MAX_ATTEMPTS = 2; // одна повторная попытка при временном сбое
 const TOP_SCORERS_COUNT = 10;
-const REQUEST_TIMEOUT_MS = 8000;
+const REQUEST_TIMEOUT_MS = 10000;
 const AUTO_REFRESH_MS = 2 * 60 * 1000;
 
 /* ---------- DOM ---------- */
@@ -82,25 +82,22 @@ async function fetchOnce(url) {
   }
 }
 
-/** Индекс последнего рабочего способа доступа (чтобы не перебирать заново на каждый запрос). */
-let activeRoute = 0;
-
 /**
- * Загрузка JSON из API NHL.
- * Сначала идём напрямую; если браузер блокирует запрос (API NHL не всегда отдаёт
- * CORS-заголовки) — пробуем публичные CORS-прокси из списка ROUTES.
+ * Единая точка загрузки JSON из API NHL: каждый запрос идёт через воркер.
+ * @param {string} url       исходный URL API NHL (без прокси)
+ * @param {Function} validate необязательная проверка структуры ответа;
+ *                            если она бросает ошибку — запрос повторяется
  */
-async function fetchJson(url) {
+async function fetchJson(url, validate = () => {}) {
   let lastError;
-  for (let i = 0; i < ROUTES.length; i++) {
-    const index = (activeRoute + i) % ROUTES.length;
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
     try {
-      const data = await fetchOnce(ROUTES[index](url));
-      activeRoute = index;
+      const data = await fetchOnce(viaWorker(url));
+      validate(data);
       return data;
     } catch (error) {
       lastError = error;
-      console.warn(`Способ доступа #${index} не сработал:`, error);
+      console.warn(`Запрос через воркер не удался (попытка ${attempt}/${MAX_ATTEMPTS}):`, error);
     }
   }
   throw lastError;
@@ -218,10 +215,11 @@ function renderScorers(players) {
 
 /** Таблицы лиги: возвращает нормализованный массив из 32 команд и id сезона. */
 async function loadStandings() {
-  const data = await fetchJson(API.standings);
-  if (!Array.isArray(data.standings) || !data.standings.length) {
-    throw new Error('Пустой ответ турнирной таблицы');
-  }
+  const data = await fetchJson(API.standings, (d) => {
+    if (!Array.isArray(d?.standings) || !d.standings.length) {
+      throw new Error('Пустой ответ турнирной таблицы');
+    }
+  });
   return {
     teams: data.standings.map(normalizeTeam),
     seasonId: data.standings[0].seasonId,
@@ -241,7 +239,9 @@ async function loadScorersPrimary(seasonId) {
     sort,
     cayenneExp: `seasonId=${seasonId} and gameTypeId=2`, // gameTypeId=2 — регулярный чемпионат
   });
-  const { data } = await fetchJson(`${API.skaterSummary}?${params}`);
+  const { data } = await fetchJson(`${API.skaterSummary}?${params}`, (d) => {
+    if (!Array.isArray(d?.data)) throw new Error('Некорректный ответ статистики игроков');
+  });
 
   return data.map((p) => ({
     name: p.skaterFullName,
@@ -256,7 +256,9 @@ async function loadScorersPrimary(seasonId) {
 
 /** Запасной путь: лидеры по очкам + статистика каждого игрока из его карточки. */
 async function loadScorersFallback() {
-  const { points } = await fetchJson(`${API.leaders}?categories=points&limit=${TOP_SCORERS_COUNT}`);
+  const { points } = await fetchJson(`${API.leaders}?categories=points&limit=${TOP_SCORERS_COUNT}`, (d) => {
+    if (!Array.isArray(d?.points)) throw new Error('Некорректный ответ лидеров');
+  });
   return Promise.all(points.map(async (p) => {
     const landing = await fetchJson(API.player(p.id));
     const season = landing.featuredStats?.regularSeason?.subSeason ?? {};
@@ -312,6 +314,7 @@ async function refresh({ silent = false } = {}) {
     renderConference(dom.eastBody, teams, 'E');
     renderConference(dom.westBody, teams, 'W');
     dom.seasonLabel.textContent = seasonLabel(seasonId);
+    setLoading(false); // таблицы готовы — не заставляем ждать загрузку бомбардиров
 
     // 2. Бомбардиры (блок 4) — отдельная обработка ошибки, чтобы не ломать таблицы
     try {
