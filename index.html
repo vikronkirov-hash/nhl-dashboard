@@ -2,9 +2,12 @@
 <html lang="ru">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="theme-color" content="#0b1226">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#0f1117">
   <title>Спортивный дашборд: NHL, NBA, Лига чемпионов</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
   <link rel="preconnect" href="https://assets.nhle.com">
   <link rel="preconnect" href="https://a.espncdn.com">
   <link rel="stylesheet" href="style.css">
@@ -39,8 +42,10 @@
         <button class="tab" role="tab" id="tab-nba" data-league="nba" aria-controls="panel-nba" aria-selected="false" tabindex="-1">
           <span class="tab__icon" aria-hidden="true">🏀</span> NBA
         </button>
-        <button class="tab" role="tab" id="tab-ucl" data-league="ucl" aria-controls="panel-ucl" aria-selected="false" tabindex="-1">
-          <span class="tab__icon" aria-hidden="true">⚽</span> Champions League
+        <button class="tab" role="tab" id="tab-ucl" data-league="ucl" aria-controls="panel-ucl" aria-selected="false" tabindex="-1" aria-label="Champions League">
+          <span class="tab__icon" aria-hidden="true">⚽</span>
+          <span class="tab__label" aria-hidden="true">Champions League</span>
+          <span class="tab__label-short" aria-hidden="true">UCL</span>
         </button>
       </div>
     </div>
@@ -76,6 +81,24 @@
           </table>
         </div>
         <p class="note">Нажмите на строку, чтобы увидеть подробности. Сортировка: очки → меньше игр → победы в основное время (RW) → RW+OT → всего побед → разница шайб.</p>
+      </section>
+
+      <!-- Блок: Александр Овечкин — погоня за рекордом голов -->
+      <section class="card card--ovi" aria-labelledby="h-ovi" id="ovi-card">
+        <h2 class="card__title" id="h-ovi">⭐ Александр Овечкин</h2>
+        <p class="inline-error" id="ovi-error" hidden>Не удалось загрузить статистику Овечкина.</p>
+        <div id="ovi-content" class="ovi">
+          <div class="ovi__loading"><div class="loader__puck"></div><p>Загружаем статистику…</p></div>
+        </div>
+      </section>
+
+      <!-- Блок: последние прошедшие матчи NHL -->
+      <section class="card" aria-labelledby="h-recent">
+        <h2 class="card__title" id="h-recent">🏒 Последние матчи</h2>
+        <p class="inline-error" id="recent-error" hidden>Не удалось загрузить результаты матчей.</p>
+        <div id="recent-games" class="recent-games">
+          <div class="ovi__loading"><div class="loader__puck"></div><p>Загружаем результаты…</p></div>
+        </div>
       </section>
 
       <!-- Блоки 2 и 3: таблицы конференций -->

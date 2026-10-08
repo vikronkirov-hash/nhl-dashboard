@@ -26,8 +26,16 @@ const API = {
   // Расписание/результаты клуба за сезон и статистика игроков клуба (для окна команды)
   clubSchedule: (abbrev) => `https://api-web.nhle.com/v1/club-schedule-season/${abbrev}/now`,
   clubStats: (abbrev) => `https://api-web.nhle.com/v1/club-stats/${abbrev}/now`,
+  // Счёт матчей за день (score/now) и за конкретную дату (score/YYYY-MM-DD)
+  scoreNow: 'https://api-web.nhle.com/v1/score/now',
+  scoreDate: (date) => `https://api-web.nhle.com/v1/score/${date}`,
   logo: (abbrev) => `https://assets.nhle.com/logos/nhl/svg/${abbrev}_dark.svg`,
 };
+
+/** ID Александра Овечкина в API NHL и рекорд Уэйна Гретцки по голам в регулярках. */
+const OVECHKIN_ID = 8471214;
+const GRETZKY_GOALS = 894;
+const RECENT_GAMES_LIMIT = 12;
 
 /**
  * Источник данных для NBA и Лиги чемпионов — публичное API ESPN (ключ не нужен).
@@ -85,6 +93,10 @@ const dom = {
   westBody: $('#west-table tbody'),
   scorersBody: $('#scorers-table tbody'),
   scorersError: $('#scorers-error'),
+  oviContent: $('#ovi-content'),
+  oviError: $('#ovi-error'),
+  recentGames: $('#recent-games'),
+  recentError: $('#recent-error'),
   // NBA
   nbaEastBody: $('#nba-east-table tbody'),
   nbaWestBody: $('#nba-west-table tbody'),
@@ -339,6 +351,188 @@ function seasonLabel(seasonId) {
   return `Регулярный чемпионат ${s.slice(0, 4)}/${s.slice(4)}`;
 }
 
+/* ==========================================================================
+   Виджет Овечкина и лента последних матчей
+   ========================================================================== */
+
+/** Отрисовка премиальной карточки Овечкина (карьера + прогресс до/сверх рекорда Гретцки). */
+function renderOvechkin(player) {
+  const season = player.featuredStats?.regularSeason?.subSeason ?? {};
+  const career = player.featuredStats?.regularSeason?.career
+    ?? player.careerTotals?.regularSeason
+    ?? {};
+  const goals = career.goals ?? 0;
+  const seasonGoals = season.goals ?? 0;
+  const remaining = Math.max(0, GRETZKY_GOALS - goals);
+  const ahead = Math.max(0, goals - GRETZKY_GOALS);
+  const broken = goals >= GRETZKY_GOALS;
+  // Шкала: до рекорда — процент от 894; после — 100% с отметкой лидерства
+  const pct = Math.min(100, Math.round((goals / GRETZKY_GOALS) * 1000) / 10);
+  const team = player.currentTeamAbbrev ?? 'WSH';
+  const name = `${player.firstName?.default ?? 'Alex'} ${player.lastName?.default ?? 'Ovechkin'}`;
+  const headshot = player.headshot || '';
+
+  const chaseLabel = broken
+    ? `Рекорд побит! +${ahead} к рекорду Гретцки (${GRETZKY_GOALS})`
+    : `До рекорда Гретцки (${GRETZKY_GOALS}) осталось <strong>${remaining}</strong> ${pluralGoals(remaining)}`;
+
+  dom.oviContent.innerHTML = `
+    <div class="ovi__hero">
+      <button class="ovi__photo-btn" type="button" data-player="${OVECHKIN_ID}" aria-label="Открыть карточку ${esc(name)}">
+        <img class="ovi__photo" src="${esc(headshot)}" alt="" width="112" height="112" data-hide-on-error>
+      </button>
+      <div class="ovi__intro">
+        <div class="ovi__name-row">
+          <h3 class="ovi__name">${esc(name)}</h3>
+          <span class="badge">#${player.sweaterNumber ?? 8}</span>
+        </div>
+        <p class="ovi__meta">
+          <img class="inline-logo" src="${esc(API.logo(team))}" alt="" width="18" height="18">
+          ${esc(player.fullTeamName?.default ?? team)} · ${esc(POSITIONS[player.position] ?? player.position ?? 'ЛН')}
+        </p>
+        <div class="ovi__goals-big">
+          <span class="ovi__goals-num">${goals}</span>
+          <span class="ovi__goals-label">голов в карьере (регулярка)</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="ovi__chase ${broken ? 'ovi__chase--broken' : ''}">
+      <div class="ovi__chase-head">
+        <span>${chaseLabel}</span>
+        <span class="ovi__chase-pct">${pct}%</span>
+      </div>
+      <div class="ovi__bar" role="progressbar" aria-valuemin="0" aria-valuemax="${GRETZKY_GOALS}"
+           aria-valuenow="${goals}" aria-label="Прогресс к рекорду Гретцки">
+        <div class="ovi__bar-fill" style="width:${pct}%"></div>
+        <div class="ovi__bar-mark" style="left:100%" title="Гретцки: ${GRETZKY_GOALS}"></div>
+      </div>
+      <div class="ovi__chase-scale">
+        <span>0</span>
+        <span>Гретцки · ${GRETZKY_GOALS}</span>
+        ${broken ? `<span class="ovi__lead">Овечкин · ${goals}</span>` : `<span>${GRETZKY_GOALS}</span>`}
+      </div>
+    </div>
+
+    <div class="stat-grid ovi__stats">
+      <div class="stat"><div class="stat__value">${seasonGoals}</div><div class="stat__label">Голы · сезон</div></div>
+      <div class="stat"><div class="stat__value">${dash(career.gamesPlayed)}</div><div class="stat__label">Матчи</div></div>
+      <div class="stat"><div class="stat__value">${dash(career.assists)}</div><div class="stat__label">Передачи</div></div>
+      <div class="stat"><div class="stat__value ovi__pts">${dash(career.points)}</div><div class="stat__label">Очки</div></div>
+      <div class="stat"><div class="stat__value">${dash(career.powerPlayGoals)}</div><div class="stat__label">Гол. в бол-ве</div></div>
+      <div class="stat"><div class="stat__value">${dash(season.gamesPlayed)}</div><div class="stat__label">Игр · сезон</div></div>
+    </div>`;
+}
+
+/** Склонение «гол / гола / голов». */
+function pluralGoals(n) {
+  const mod10 = n % 10;
+  const mod100 = n % 100;
+  if (mod10 === 1 && mod100 !== 11) return 'гол';
+  if (mod10 >= 2 && mod10 <= 4 && (mod100 < 12 || mod100 > 14)) return 'гола';
+  return 'голов';
+}
+
+async function loadOvechkin() {
+  const player = await fetchJson(API.player(OVECHKIN_ID), (d) => {
+    if (!d?.playerId && !d?.firstName) throw new Error('Пустой ответ профиля Овечкина');
+  });
+  renderOvechkin(player);
+}
+
+/** Нормализация матча из /v1/score/{date} в компактный объект для ленты. */
+function normalizeScoreGame(g) {
+  const period = g.gameOutcome?.lastPeriodType; // REG | OT | SO
+  return {
+    id: g.id,
+    date: g.gameDate,
+    state: g.gameState,
+    away: {
+      abbrev: g.awayTeam.abbrev,
+      name: g.awayTeam.name?.default ?? g.awayTeam.abbrev,
+      score: g.awayTeam.score ?? 0,
+      logo: API.logo(g.awayTeam.abbrev),
+    },
+    home: {
+      abbrev: g.homeTeam.abbrev,
+      name: g.homeTeam.name?.default ?? g.homeTeam.abbrev,
+      score: g.homeTeam.score ?? 0,
+      logo: API.logo(g.homeTeam.abbrev),
+    },
+    extra: period === 'OT' || period === 'SO' ? period : '',
+  };
+}
+
+/**
+ * Собирает последние завершённые матчи: берём score/now и при необходимости
+ * шагаем по prevDate, пока не наберём RECENT_GAMES_LIMIT игр.
+ */
+async function loadRecentGames() {
+  const finished = [];
+  let data = await fetchJson(API.scoreNow, (d) => {
+    if (!Array.isArray(d?.games) && !d?.prevDate) throw new Error('Пустой ответ score/now');
+  });
+
+  const takeFinished = (payload) => {
+    for (const g of payload.games ?? []) {
+      if (g.gameState === 'OFF' || g.gameState === 'FINAL') finished.push(normalizeScoreGame(g));
+    }
+  };
+
+  takeFinished(data);
+
+  // Идём назад по дням (не больше 5 запросов), чтобы набрать полный список
+  let prev = data.prevDate;
+  for (let i = 0; i < 5 && finished.length < RECENT_GAMES_LIMIT && prev; i++) {
+    data = await fetchJson(API.scoreDate(prev), (d) => {
+      if (!Array.isArray(d?.games)) throw new Error('Пустой ответ score/date');
+    });
+    takeFinished(data);
+    prev = data.prevDate;
+  }
+
+  // Свежие сверху
+  finished.sort((a, b) => (b.date > a.date ? 1 : b.date < a.date ? -1 : b.id - a.id));
+  return finished.slice(0, RECENT_GAMES_LIMIT);
+}
+
+function renderRecentGames(games) {
+  if (!games.length) {
+    dom.recentGames.innerHTML = '<p class="muted">Пока нет завершённых матчей.</p>';
+    return;
+  }
+
+  let lastDate = '';
+  const parts = [];
+  for (const g of games) {
+    if (g.date !== lastDate) {
+      lastDate = g.date;
+      parts.push(`<h3 class="recent-games__day">${fmtDate(g.date)}</h3>`);
+    }
+    const awayWin = g.away.score > g.home.score;
+    const homeWin = g.home.score > g.away.score;
+    parts.push(`
+      <article class="recent-game">
+        <div class="recent-game__teams">
+          <div class="recent-game__team ${awayWin ? 'is-winner' : ''}">
+            <img src="${esc(g.away.logo)}" alt="" width="28" height="28" loading="lazy">
+            <span>${esc(g.away.abbrev)}</span>
+            <strong class="recent-game__score">${g.away.score}</strong>
+          </div>
+          <div class="recent-game__team ${homeWin ? 'is-winner' : ''}">
+            <img src="${esc(g.home.logo)}" alt="" width="28" height="28" loading="lazy">
+            <span>${esc(g.home.abbrev)}</span>
+            <strong class="recent-game__score">${g.home.score}</strong>
+          </div>
+        </div>
+        <div class="recent-game__status">
+          <span class="recent-game__final">Final${g.extra ? `/${g.extra}` : ''}</span>
+        </div>
+      </article>`);
+  }
+  dom.recentGames.innerHTML = `<div class="recent-games__grid">${parts.join('')}</div>`;
+}
+
 /**
  * Полная загрузка вкладки NHL: загрузка → отрисовка.
  * @param {{ready: Function}} ctx  ready() скрывает лоадер, не дожидаясь бомбардиров
@@ -351,16 +545,38 @@ async function loadNhl(ctx) {
   renderTournament(teams);
   renderConference(dom.eastBody, teams, 'E');
   renderConference(dom.westBody, teams, 'W');
-  ctx.ready(); // таблицы готовы — не заставляем ждать загрузку бомбардиров
+  ctx.ready(); // таблицы готовы — не ждём Овечкина, матчи и бомбардиров
 
-  // 2. Бомбардиры (блок 4) — отдельная обработка ошибки, чтобы не ломать таблицы
-  try {
-    renderScorers(await loadScorers(seasonId));
-    dom.scorersError.hidden = true;
-  } catch (scorersError) {
-    console.error(scorersError);
-    dom.scorersError.hidden = false;
-  }
+  // 2. Овечкин, последние матчи и бомбардиры — параллельно, ошибки изолированы
+  const sideTasks = [
+    loadOvechkin()
+      .then(() => { dom.oviError.hidden = true; })
+      .catch((e) => {
+        console.error(e);
+        dom.oviError.hidden = false;
+        dom.oviContent.innerHTML = '';
+      }),
+    loadRecentGames()
+      .then((games) => {
+        renderRecentGames(games);
+        dom.recentError.hidden = true;
+      })
+      .catch((e) => {
+        console.error(e);
+        dom.recentError.hidden = false;
+        dom.recentGames.innerHTML = '';
+      }),
+    loadScorers(seasonId)
+      .then((players) => {
+        renderScorers(players);
+        dom.scorersError.hidden = true;
+      })
+      .catch((e) => {
+        console.error(e);
+        dom.scorersError.hidden = false;
+      }),
+  ];
+  await Promise.all(sideTasks);
 
   return { subtitle: seasonLabel(seasonId) };
 }
@@ -693,6 +909,7 @@ function showModal(html) {
   clearTimeout(modal.closeTimer);
   modal.body.innerHTML = html;
   modal.body.scrollTop = 0;
+  modal.body.querySelectorAll('.table-wrap').forEach(watchScroll);  // таблицы внутри окна тоже скроллятся
   if (modal.root.hidden) {
     modal.lastFocus = document.activeElement;
     modal.root.hidden = false;
@@ -1078,6 +1295,40 @@ document.addEventListener('keydown', (e) => {
   if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
   else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
 });
+
+/* ==========================================================================
+   Подсказки горизонтальной прокрутки таблиц
+   Если таблица шире экрана, край со скрытым содержимым плавно затухает
+   (стили — .table-wrap.can-scroll-left/right в style.css).
+   ========================================================================== */
+
+const scrollObserver = 'ResizeObserver' in window
+  ? new ResizeObserver((entries) => entries.forEach((e) => updateScrollHints(e.target.closest('.table-wrap') ?? e.target)))
+  : null;
+
+function updateScrollHints(wrap) {
+  const max = wrap.scrollWidth - wrap.clientWidth;
+  wrap.classList.toggle('can-scroll-left', wrap.scrollLeft > 4);
+  wrap.classList.toggle('can-scroll-right', max > 4 && wrap.scrollLeft < max - 4);
+}
+
+/** Подключает подсказки к контейнеру таблицы (повторный вызов безопасен). */
+function watchScroll(wrap) {
+  if (wrap.dataset.scrollWatched) return;
+  wrap.dataset.scrollWatched = '1';
+  wrap.addEventListener('scroll', () => updateScrollHints(wrap), { passive: true });
+  // Размеры меняются при показе панели вкладки, перерисовке данных и повороте экрана
+  scrollObserver?.observe(wrap);
+  const table = wrap.querySelector('table');
+  if (table) scrollObserver?.observe(table);
+  updateScrollHints(wrap);
+}
+
+document.querySelectorAll('.table-wrap').forEach(watchScroll);
+
+/** Синхронный пересчёт подсказок для видимых таблиц (после смены вкладки или обновления данных). */
+const refreshScrollHints = () =>
+  document.querySelectorAll('.panel:not([hidden]) .table-wrap').forEach(updateScrollHints);
 
 /* ==========================================================================
    Вкладки лиг: переключение, ленивая загрузка, запоминание выбора
