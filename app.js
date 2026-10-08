@@ -77,9 +77,9 @@ const WORKER_URL = 'https://nhl-proxy.vikronkirov.workers.dev/';
 /** Оборачивает URL API NHL в запрос к воркеру. */
 const viaWorker = (url) => `${WORKER_URL}?url=${encodeURIComponent(url)}`;
 
-const MAX_ATTEMPTS = 2; // одна повторная попытка при временном сбое
+const MAX_ATTEMPTS = 2; // первая попытка + один повтор, если запрос не уложился в таймаут
 const TOP_SCORERS_COUNT = 10;
-const REQUEST_TIMEOUT_MS = 10000;
+const REQUEST_TIMEOUT_MS = 6000;
 const AUTO_REFRESH_MS = 2 * 60 * 1000;
 
 /* ---------- DOM ---------- */
@@ -124,7 +124,11 @@ const esc = (value) =>
     { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch]
   ));
 
-/** Один запрос с таймаутом и проверкой HTTP-статуса, возвращает JSON. */
+/**
+ * Один запрос с жёстким таймаутом.
+ * Если ответ не пришёл за REQUEST_TIMEOUT_MS — соединение обрывается,
+ * а fetchJson делает повторную попытку.
+ */
 async function fetchOnce(url) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
@@ -132,16 +136,23 @@ async function fetchOnce(url) {
     const response = await fetch(url, { signal: controller.signal });
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     return await response.json();
+  } catch (error) {
+    if (error?.name === 'AbortError') {
+      const timeout = new Error(`Таймаут ${REQUEST_TIMEOUT_MS / 1000} с: ${url}`);
+      timeout.name = 'AbortError';
+      throw timeout;
+    }
+    throw error;
   } finally {
     clearTimeout(timer);
   }
 }
 
 /**
- * Единая точка загрузки JSON из API NHL: каждый запрос идёт через воркер.
- * @param {string} url       исходный URL API NHL (без прокси)
- * @param {Function} validate необязательная проверка структуры ответа;
- *                            если она бросает ошибку — запрос повторяется
+ * Единая точка загрузки JSON: каждый запрос идёт через воркер.
+ * При таймауте или сетевой ошибке запрос повторяется ещё один раз.
+ * @param {string} url       исходный URL API (без прокси)
+ * @param {Function} validate проверка структуры; ошибка тоже запускает повтор
  */
 async function fetchJson(url, validate = () => {}) {
   let lastError;
@@ -152,7 +163,7 @@ async function fetchJson(url, validate = () => {}) {
       return data;
     } catch (error) {
       lastError = error;
-      console.warn(`Запрос через воркер не удался (попытка ${attempt}/${MAX_ATTEMPTS}):`, error);
+      console.warn(`Запрос не удался (попытка ${attempt}/${MAX_ATTEMPTS}):`, error);
     }
   }
   throw lastError;
@@ -489,34 +500,43 @@ function normalizeScoreGame(g) {
 }
 
 /**
- * Собирает последние завершённые матчи: берём score/now и при необходимости
- * шагаем по prevDate, пока не наберём RECENT_GAMES_LIMIT игр.
+ * Последние завершённые матчи.
+ * Берём score/now и параллельно несколько предыдущих дней из gameWeek.
+ * Детальный протокол (landing/boxscore) здесь НЕ запрашивается — только по клику.
  */
 async function loadRecentGames() {
   const finished = [];
-  let data = await fetchJson(API.scoreNow, (d) => {
-    if (!Array.isArray(d?.games) && !d?.prevDate) throw new Error('Пустой ответ score/now');
-  });
-
   const takeFinished = (payload) => {
     for (const g of payload.games ?? []) {
       if (g.gameState === 'OFF' || g.gameState === 'FINAL') finished.push(normalizeScoreGame(g));
     }
   };
 
-  takeFinished(data);
+  const now = await fetchJson(API.scoreNow, (d) => {
+    if (!Array.isArray(d?.games) && !d?.prevDate) throw new Error('Пустой ответ score/now');
+  });
+  takeFinished(now);
 
-  // Идём назад по дням (не больше 5 запросов), чтобы набрать полный список
-  let prev = data.prevDate;
-  for (let i = 0; i < 5 && finished.length < RECENT_GAMES_LIMIT && prev; i++) {
-    data = await fetchJson(API.scoreDate(prev), (d) => {
-      if (!Array.isArray(d?.games)) throw new Error('Пустой ответ score/date');
-    });
-    takeFinished(data);
-    prev = data.prevDate;
+  const today = now.currentDate ?? '';
+  const extraDates = [];
+  for (const day of now.gameWeek ?? []) {
+    if (day?.date && today && day.date < today && day.numberOfGames > 0) extraDates.push(day.date);
+  }
+  if (now.prevDate && !extraDates.includes(now.prevDate)) extraDates.push(now.prevDate);
+  // Хватает двух-трёх ближайших дней; запросы идут одновременно, а не очередью
+  const dates = extraDates.slice(-3);
+
+  if (finished.length < RECENT_GAMES_LIMIT && dates.length) {
+    const days = await Promise.allSettled(dates.map((date) =>
+      fetchJson(API.scoreDate(date), (d) => {
+        if (!Array.isArray(d?.games)) throw new Error('Пустой ответ score/date');
+      })));
+    for (const result of days) {
+      if (result.status === 'fulfilled') takeFinished(result.value);
+      else console.warn('День расписания не загрузился:', result.reason);
+    }
   }
 
-  // Свежие сверху
   finished.sort((a, b) => (b.date > a.date ? 1 : b.date < a.date ? -1 : b.id - a.id));
   return finished.slice(0, RECENT_GAMES_LIMIT);
 }
@@ -660,6 +680,10 @@ function gameHtml(landing) {
     ${starsHtml}`;
 }
 
+/**
+ * Протокол матча. Вызывается только по клику на карточку:
+ * при первой загрузке страницы gamecenter/landing и boxscore не запрашиваются.
+ */
 async function openGame(gameId) {
   const token = ++modal.token;
   modal.retry = () => openGame(gameId);
@@ -688,52 +712,94 @@ async function openGame(gameId) {
   }
 }
 
+/** Пустые таблицы, если standings не пришли — остальные блоки при этом живут своей жизнью. */
+function renderStandingsFailure() {
+  dom.tournamentBody.innerHTML =
+    '<tr><td class="empty" colspan="5">Не удалось загрузить турнирную таблицу.</td></tr>';
+  const conf = '<tr><td class="empty" colspan="8">Не удалось загрузить таблицу конференции.</td></tr>';
+  dom.eastBody.innerHTML = conf;
+  dom.westBody.innerHTML = conf;
+}
+
 /**
- * Полная загрузка вкладки NHL: загрузка → отрисовка.
- * @param {{ready: Function}} ctx  ready() скрывает лоадер, не дожидаясь бомбардиров
+ * Вкладка NHL: турнир, конференции, Овечкин и лента матчей грузятся параллельно.
+ * Падение одного блока (allSettled) не отменяет остальные.
+ * Boxscore конкретной игры здесь не запрашивается.
+ * @param {{ready: Function}} ctx
  * @returns {Promise<{subtitle: string}>}
  */
 async function loadNhl(ctx) {
-  // 1. Турнирные таблицы (блоки 1–3)
-  const { teams, seasonId } = await loadStandings();
-  teams.forEach((t) => teamsByAbbrev.set(t.abbrev, t));
-  renderTournament(teams);
-  renderConference(dom.eastBody, teams, 'E');
-  renderConference(dom.westBody, teams, 'W');
-  ctx.ready(); // таблицы готовы — не ждём Овечкина, матчи и бомбардиров
+  let seasonId = null;
+  let readyCalled = false;
+  const readyOnce = () => {
+    if (readyCalled) return;
+    readyCalled = true;
+    ctx.ready();
+  };
 
-  // 2. Овечкин, последние матчи и бомбардиры — параллельно, ошибки изолированы
-  const sideTasks = [
-    loadOvechkin()
-      .then(() => { dom.oviError.hidden = true; })
-      .catch((e) => {
-        console.error(e);
-        dom.oviError.hidden = false;
-        dom.oviContent.innerHTML = '';
-      }),
-    loadRecentGames()
-      .then((games) => {
-        renderRecentGames(games);
-        dom.recentError.hidden = true;
-      })
-      .catch((e) => {
-        console.error(e);
-        dom.recentError.hidden = false;
-        dom.recentGames.innerHTML = '';
-      }),
-    loadScorers(seasonId)
-      .then((players) => {
-        renderScorers(players);
-        dom.scorersError.hidden = true;
-      })
-      .catch((e) => {
-        console.error(e);
-        dom.scorersError.hidden = false;
-      }),
-  ];
-  await Promise.all(sideTasks);
+  const standingsTask = loadStandings()
+    .then((data) => {
+      seasonId = data.seasonId;
+      data.teams.forEach((t) => teamsByAbbrev.set(t.abbrev, t));
+      renderTournament(data.teams);
+      renderConference(dom.eastBody, data.teams, 'E');
+      renderConference(dom.westBody, data.teams, 'W');
+      readyOnce();
+      // Бомбардиры зависят от id сезона и не должны задерживать остальные блоки
+      loadScorers(seasonId)
+        .then((players) => {
+          renderScorers(players);
+          dom.scorersError.hidden = true;
+        })
+        .catch((error) => {
+          console.error(error);
+          dom.scorersError.hidden = false;
+        });
+      return data;
+    })
+    .catch((error) => {
+      console.error(error);
+      renderStandingsFailure();
+      readyOnce();
+      throw error;
+    });
 
-  return { subtitle: seasonLabel(seasonId) };
+  const oviTask = loadOvechkin()
+    .then(() => {
+      dom.oviError.hidden = true;
+      readyOnce();
+    })
+    .catch((error) => {
+      console.error(error);
+      dom.oviError.hidden = false;
+      dom.oviContent.innerHTML = '';
+      readyOnce();
+      throw error;
+    });
+
+  const recentTask = loadRecentGames()
+    .then((games) => {
+      renderRecentGames(games);
+      dom.recentError.hidden = true;
+      readyOnce();
+    })
+    .catch((error) => {
+      console.error(error);
+      dom.recentError.hidden = false;
+      dom.recentGames.innerHTML = '';
+      readyOnce();
+      throw error;
+    });
+
+  const results = await Promise.allSettled([standingsTask, oviTask, recentTask]);
+  readyOnce();
+
+  // Общий баннер — только если не поднялся ни один блок
+  if (results.every((result) => result.status === 'rejected')) {
+    throw results[0].reason;
+  }
+
+  return { subtitle: seasonId ? seasonLabel(seasonId) : 'NHL' };
 }
 
 /* ==========================================================================
