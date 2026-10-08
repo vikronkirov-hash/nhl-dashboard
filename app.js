@@ -1,3 +1,4 @@
+/* sports-dashboard build: ovi+recent+boxscore 2026-10-08 16:16:10*/
 /* ==========================================================================
    Дружеский турнир NHL — клиентская логика
    Все запросы выполняются прямо в браузере (без бэкенда).
@@ -29,13 +30,18 @@ const API = {
   // Счёт матчей за день (score/now) и за конкретную дату (score/YYYY-MM-DD)
   scoreNow: 'https://api-web.nhle.com/v1/score/now',
   scoreDate: (date) => `https://api-web.nhle.com/v1/score/${date}`,
+  // Детальная карточка матча: голы по периодам + SOG команд
+  gameLanding: (id) => `https://api-web.nhle.com/v1/gamecenter/${id}/landing`,
+  gameBoxscore: (id) => `https://api-web.nhle.com/v1/gamecenter/${id}/boxscore`,
   logo: (abbrev) => `https://assets.nhle.com/logos/nhl/svg/${abbrev}_dark.svg`,
 };
 
-/** ID Александра Овечкина в API NHL и рекорд Уэйна Гретцки по голам в регулярках. */
+/** ID Александра Овечкина и абсолютный рекорд Гретцки (регулярка 894 + плей-офф 122 = 1016). */
 const OVECHKIN_ID = 8471214;
-const GRETZKY_GOALS = 894;
+const GRETZKY_REG_GOALS = 894;
+const GRETZKY_ABS_GOALS = 1016;
 const RECENT_GAMES_LIMIT = 12;
+const STRENGTH_RU = { ev: 'равн.', pp: 'бол-во', sh: 'мен-во', en: 'пустые' };
 
 /**
  * Источник данных для NBA и Лиги чемпионов — публичное API ESPN (ключ не нужен).
@@ -355,26 +361,35 @@ function seasonLabel(seasonId) {
    Виджет Овечкина и лента последних матчей
    ========================================================================== */
 
-/** Отрисовка премиальной карточки Овечкина (карьера + прогресс до/сверх рекорда Гретцки). */
+/**
+ * Карточка Овечкина: голы за регулярку + абсолютная гонка (регулярка + плей-офф)
+ * к рекорду Гретцки 1016 (894 + 122).
+ */
 function renderOvechkin(player) {
   const season = player.featuredStats?.regularSeason?.subSeason ?? {};
-  const career = player.featuredStats?.regularSeason?.career
-    ?? player.careerTotals?.regularSeason
+  const careerReg = player.careerTotals?.regularSeason
+    ?? player.featuredStats?.regularSeason?.career
     ?? {};
-  const goals = career.goals ?? 0;
+  const careerPo = player.careerTotals?.playoffs ?? {};
+
+  const regGoals = careerReg.goals ?? 0;
+  const poGoals = careerPo.goals ?? 0;
+  const absoluteGoals = regGoals + poGoals;
   const seasonGoals = season.goals ?? 0;
-  const remaining = Math.max(0, GRETZKY_GOALS - goals);
-  const ahead = Math.max(0, goals - GRETZKY_GOALS);
-  const broken = goals >= GRETZKY_GOALS;
-  // Шкала: до рекорда — процент от 894; после — 100% с отметкой лидерства
-  const pct = Math.min(100, Math.round((goals / GRETZKY_GOALS) * 1000) / 10);
+
+  const remaining = Math.max(0, GRETZKY_ABS_GOALS - absoluteGoals);
+  const ahead = Math.max(0, absoluteGoals - GRETZKY_ABS_GOALS);
+  const broken = absoluteGoals >= GRETZKY_ABS_GOALS;
+  const pct = Math.min(100, Math.round((absoluteGoals / GRETZKY_ABS_GOALS) * 1000) / 10);
+
   const team = player.currentTeamAbbrev ?? 'WSH';
   const name = `${player.firstName?.default ?? 'Alex'} ${player.lastName?.default ?? 'Ovechkin'}`;
   const headshot = player.headshot || '';
 
+  // До рекорда — явный счётчик «осталось N»; после — лидерство
   const chaseLabel = broken
-    ? `Рекорд побит! +${ahead} к рекорду Гретцки (${GRETZKY_GOALS})`
-    : `До рекорда Гретцки (${GRETZKY_GOALS}) осталось <strong>${remaining}</strong> ${pluralGoals(remaining)}`;
+    ? `Абсолютный рекорд побит! +${ahead} к Гретцки (${GRETZKY_ABS_GOALS})`
+    : `До абсолютного рекорда Гретцки (регулярка + плей-офф): осталось <strong>${remaining}</strong> ${pluralGoals(remaining)}`;
 
   dom.oviContent.innerHTML = `
     <div class="ovi__hero">
@@ -390,9 +405,16 @@ function renderOvechkin(player) {
           <img class="inline-logo" src="${esc(API.logo(team))}" alt="" width="18" height="18">
           ${esc(player.fullTeamName?.default ?? team)} · ${esc(POSITIONS[player.position] ?? player.position ?? 'ЛН')}
         </p>
-        <div class="ovi__goals-big">
-          <span class="ovi__goals-num">${goals}</span>
-          <span class="ovi__goals-label">голов в карьере (регулярка)</span>
+        <div class="ovi__goals-row">
+          <div class="ovi__goals-big">
+            <span class="ovi__goals-num">${absoluteGoals}</span>
+            <span class="ovi__goals-label">всего голов (регулярка + плей-офф)</span>
+          </div>
+          <div class="ovi__goals-split">
+            <div><b>${regGoals}</b><span>регулярка</span></div>
+            <div><b>${poGoals}</b><span>плей-офф</span></div>
+            <div><b>${GRETZKY_ABS_GOALS}</b><span>рекорд Гретцки</span></div>
+          </div>
         </div>
       </div>
     </div>
@@ -402,24 +424,27 @@ function renderOvechkin(player) {
         <span>${chaseLabel}</span>
         <span class="ovi__chase-pct">${pct}%</span>
       </div>
-      <div class="ovi__bar" role="progressbar" aria-valuemin="0" aria-valuemax="${GRETZKY_GOALS}"
-           aria-valuenow="${goals}" aria-label="Прогресс к рекорду Гретцки">
+      <div class="ovi__bar" role="progressbar" aria-valuemin="0" aria-valuemax="${GRETZKY_ABS_GOALS}"
+           aria-valuenow="${absoluteGoals}" aria-label="Прогресс к абсолютному рекорду Гретцки">
         <div class="ovi__bar-fill" style="width:${pct}%"></div>
-        <div class="ovi__bar-mark" style="left:100%" title="Гретцки: ${GRETZKY_GOALS}"></div>
       </div>
       <div class="ovi__chase-scale">
         <span>0</span>
-        <span>Гретцки · ${GRETZKY_GOALS}</span>
-        ${broken ? `<span class="ovi__lead">Овечкин · ${goals}</span>` : `<span>${GRETZKY_GOALS}</span>`}
+        <span>Овечкин · ${absoluteGoals}</span>
+        <span>Гретцки · ${GRETZKY_ABS_GOALS}</span>
       </div>
+      <p class="ovi__chase-note">
+        Гретцки: ${GRETZKY_REG_GOALS} в регулярке + 122 в плей-офф = ${GRETZKY_ABS_GOALS}.
+        Овечкин: ${regGoals} + ${poGoals} = ${absoluteGoals}.
+      </p>
     </div>
 
     <div class="stat-grid ovi__stats">
       <div class="stat"><div class="stat__value">${seasonGoals}</div><div class="stat__label">Голы · сезон</div></div>
-      <div class="stat"><div class="stat__value">${dash(career.gamesPlayed)}</div><div class="stat__label">Матчи</div></div>
-      <div class="stat"><div class="stat__value">${dash(career.assists)}</div><div class="stat__label">Передачи</div></div>
-      <div class="stat"><div class="stat__value ovi__pts">${dash(career.points)}</div><div class="stat__label">Очки</div></div>
-      <div class="stat"><div class="stat__value">${dash(career.powerPlayGoals)}</div><div class="stat__label">Гол. в бол-ве</div></div>
+      <div class="stat"><div class="stat__value">${dash(careerReg.gamesPlayed)}</div><div class="stat__label">Матчи (рег.)</div></div>
+      <div class="stat"><div class="stat__value">${dash(careerReg.assists)}</div><div class="stat__label">Передачи (рег.)</div></div>
+      <div class="stat"><div class="stat__value ovi__pts">${dash(careerReg.points)}</div><div class="stat__label">Очки (рег.)</div></div>
+      <div class="stat"><div class="stat__value">${dash(careerReg.powerPlayGoals)}</div><div class="stat__label">Гол. в бол-ве</div></div>
       <div class="stat"><div class="stat__value">${dash(season.gamesPlayed)}</div><div class="stat__label">Игр · сезон</div></div>
     </div>`;
 }
@@ -512,7 +537,8 @@ function renderRecentGames(games) {
     const awayWin = g.away.score > g.home.score;
     const homeWin = g.home.score > g.away.score;
     parts.push(`
-      <article class="recent-game">
+      <article class="recent-game clickable" data-game="${esc(g.id)}" tabindex="0" role="button"
+               aria-label="Статистика матча ${esc(g.away.abbrev)} — ${esc(g.home.abbrev)}">
         <div class="recent-game__teams">
           <div class="recent-game__team ${awayWin ? 'is-winner' : ''}">
             <img src="${esc(g.away.logo)}" alt="" width="28" height="28" loading="lazy">
@@ -531,6 +557,135 @@ function renderRecentGames(games) {
       </article>`);
   }
   dom.recentGames.innerHTML = `<div class="recent-games__grid">${parts.join('')}</div>`;
+}
+
+/* ---------- Модальное окно матча ---------- */
+
+const periodTitle = (desc) => {
+  if (!desc) return 'Период';
+  if (desc.periodType === 'SO') return 'Буллиты';
+  if (desc.periodType === 'OT') return `Овертайм${desc.number > 1 ? ` ${desc.number}` : ''}`;
+  return `${desc.number}-й период`;
+};
+
+function goalRowHtml(goal) {
+  const scorer = goal.name?.default
+    ?? `${goal.firstName?.default ?? ''} ${goal.lastName?.default ?? ''}`.trim();
+  const assists = (goal.assists ?? [])
+    .map((a) => a.name?.default ?? `${a.firstName?.default ?? ''} ${a.lastName?.default ?? ''}`.trim())
+    .filter(Boolean);
+  const strength = STRENGTH_RU[goal.strength] ?? goal.strength ?? '';
+  const team = goal.teamAbbrev?.default ?? '';
+  return `
+    <li class="box-goal">
+      <img class="box-goal__shot" src="${esc(goal.headshot || '')}" alt="" width="36" height="36" data-hide-on-error>
+      <div class="box-goal__body">
+        <div class="box-goal__main">
+          <strong>${esc(scorer)}</strong>
+          <span class="box-goal__team">${esc(team)}</span>
+          ${strength ? `<span class="box-goal__str">${esc(strength)}</span>` : ''}
+        </div>
+        <div class="box-goal__assists">${assists.length ? `ассисты: ${esc(assists.join(', '))}` : 'без ассистентов'}</div>
+      </div>
+      <div class="box-goal__meta">
+        <span class="box-goal__time">${esc(goal.timeInPeriod ?? '')}</span>
+        <span class="box-goal__score">${goal.awayScore ?? 0}:${goal.homeScore ?? 0}</span>
+      </div>
+    </li>`;
+}
+
+function gameHtml(landing) {
+  const away = landing.awayTeam;
+  const home = landing.homeTeam;
+  const outcome = landing.gameOutcome?.lastPeriodType
+    ?? landing.periodDescriptor?.periodType;
+  const finalLabel = `Final${outcome === 'OT' || outcome === 'SO' ? `/${outcome}` : ''}`;
+  const periods = landing.summary?.scoring ?? [];
+
+  const scoringHtml = periods.length
+    ? periods.map((p) => `
+        <section class="modal__section">
+          <h3>${esc(periodTitle(p.periodDescriptor))} · ${(p.goals ?? []).length} ${pluralGoals((p.goals ?? []).length)}</h3>
+          ${(p.goals ?? []).length
+            ? `<ul class="box-goals">${(p.goals ?? []).map(goalRowHtml).join('')}</ul>`
+            : '<p class="muted">Голов в периоде не было.</p>'}
+        </section>`).join('')
+    : '<p class="muted">Протокол голов недоступен.</p>';
+
+  const stars = landing.summary?.threeStars ?? [];
+  const starsHtml = stars.length
+    ? `<section class="modal__section">
+        <h3>Три звезды матча</h3>
+        <ul class="box-stars">${stars.map((s) => `
+          <li class="box-star">
+            <span class="box-star__n">${s.star}</span>
+            <img src="${esc(s.headshot || '')}" alt="" width="40" height="40" data-hide-on-error>
+            <div>
+              <strong>${esc(s.name?.default ?? '')}</strong>
+              <div class="muted">${esc(s.teamAbbrev)} · ${s.goals ?? 0}Г ${s.assists ?? 0}П</div>
+            </div>
+          </li>`).join('')}</ul>
+      </section>`
+    : '';
+
+  return `
+    <header class="modal__head box-head">
+      <div class="box-scoreboard">
+        <div class="box-side">
+          <img src="${esc(API.logo(away.abbrev))}" alt="" width="48" height="48">
+          <span>${esc(away.abbrev)}</span>
+          <strong>${away.score ?? 0}</strong>
+        </div>
+        <div class="box-mid">
+          <span class="recent-game__final">${finalLabel}</span>
+          <span class="muted">${fmtDate(landing.gameDate)}</span>
+        </div>
+        <div class="box-side box-side--home">
+          <strong>${home.score ?? 0}</strong>
+          <span>${esc(home.abbrev)}</span>
+          <img src="${esc(API.logo(home.abbrev))}" alt="" width="48" height="48">
+        </div>
+      </div>
+    </header>
+
+    <div class="stat-grid">
+      ${statTile('Броски (SOG)', `${away.sog ?? '—'} : ${home.sog ?? '—'}`, `${away.abbrev} — ${home.abbrev}`)}
+      ${statTile('Счёт', `${away.score ?? 0}:${home.score ?? 0}`, finalLabel)}
+      ${statTile('Гости', away.commonName?.default ?? away.abbrev, `SOG ${away.sog ?? '—'}`)}
+      ${statTile('Хозяева', home.commonName?.default ?? home.abbrev, `SOG ${home.sog ?? '—'}`)}
+    </div>
+
+    <h2 class="modal__title" id="modal-title" hidden>${esc(away.abbrev)} ${away.score ?? 0} — ${home.score ?? 0} ${esc(home.abbrev)}</h2>
+    ${scoringHtml}
+    ${starsHtml}`;
+}
+
+async function openGame(gameId) {
+  const token = ++modal.token;
+  modal.retry = () => openGame(gameId);
+  showModal(loadingHtml('Загружаем статистику матча…'));
+
+  try {
+    const landing = await cachedJson(API.gameLanding(gameId), (d) => {
+      if (!d?.id || !d?.awayTeam || !d?.homeTeam) throw new Error('Некорректный ответ матча');
+    });
+    // Если в landing нет SOG — подстрахуемся boxscore
+    if (landing.awayTeam.sog == null || landing.homeTeam.sog == null) {
+      try {
+        const box = await cachedJson(API.gameBoxscore(gameId));
+        landing.awayTeam.sog ??= box.awayTeam?.sog;
+        landing.homeTeam.sog ??= box.homeTeam?.sog;
+        landing.gameOutcome ??= box.gameOutcome;
+      } catch (e) {
+        console.warn('boxscore недоступен, показываем landing без доп. SOG', e);
+      }
+    }
+    if (token !== modal.token) return;
+    showModal(gameHtml(landing));
+  } catch (error) {
+    console.error(error);
+    if (token === modal.token) showModal(modalErrorHtml('Не удалось загрузить статистику матча.'));
+  }
 }
 
 /**
@@ -1232,13 +1387,16 @@ async function openPlayer(id, { backTo = '' } = {}) {
 
 /* ---------- Обработчики событий окна ---------- */
 
-/** Клик (или Enter/Space) по кликабельному элементу: команда или игрок. */
+/** Клик (или Enter/Space) по кликабельному элементу: матч, команда или игрок. */
 function handleActivate(event) {
+  const gameEl = event.target.closest('[data-game]');
   const teamEl = event.target.closest('[data-team]');
   const playerEl = event.target.closest('[data-player]');
-  if (!teamEl && !playerEl) return false;
+  if (!gameEl && !teamEl && !playerEl) return false;
 
-  if (playerEl) {
+  if (gameEl) {
+    openGame(gameEl.dataset.game);
+  } else if (playerEl) {
     // Если игрок выбран внутри окна команды — запоминаем, куда вернуться
     const fromTeam = !modal.root.hidden && modal.body.contains(playerEl)
       ? modal.body.querySelector('[data-current-team]')?.dataset.currentTeam ?? '' : '';
@@ -1249,11 +1407,11 @@ function handleActivate(event) {
   return true;
 }
 
-// Таблицы страницы (делегирование: строки перерисовываются при обновлении данных)
+// Таблицы и карточки матчей (делегирование: DOM перерисовывается при обновлении)
 const main = $('main');
 main.addEventListener('click', handleActivate);
 main.addEventListener('keydown', (e) => {
-  if ((e.key === 'Enter' || e.key === ' ') && e.target.matches('tr[role="button"]')) {
+  if ((e.key === 'Enter' || e.key === ' ') && e.target.matches('[role="button"]')) {
     e.preventDefault();
     handleActivate(e);
   }

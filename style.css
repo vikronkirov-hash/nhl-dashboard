@@ -1,3 +1,4 @@
+/* sports-dashboard build: ovi+recent+boxscore 2026-10-08 16:16:10*/
 /* ==========================================================================
    Спортивный дашборд — премиальный тёмный UI
    Графитовый фон · glassmorphism · неоновый акцент · микроанимации
@@ -855,6 +856,12 @@ body.modal-open { overflow: hidden; }
   font-weight: 500;
 }
 
+.ovi__goals-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 16px 28px;
+}
 .ovi__goals-big { display: flex; flex-direction: column; gap: 2px; }
 .ovi__goals-num {
   font-size: clamp(2.4rem, 6vw, 3.4rem);
@@ -871,6 +878,36 @@ body.modal-open { overflow: hidden; }
   text-transform: uppercase;
   letter-spacing: 0.06em;
   font-weight: 600;
+}
+.ovi__goals-split {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px 18px;
+}
+.ovi__goals-split div {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 72px;
+}
+.ovi__goals-split b {
+  font-size: 1.25rem;
+  font-weight: 800;
+  color: #fff;
+  font-variant-numeric: tabular-nums;
+}
+.ovi__goals-split span {
+  font-size: 0.7rem;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  font-weight: 600;
+}
+.ovi__chase-note {
+  margin: 10px 0 0;
+  font-size: 0.78rem;
+  color: var(--text-muted);
+  line-height: 1.4;
 }
 
 .ovi__chase {
@@ -963,13 +1000,132 @@ body.modal-open { overflow: hidden; }
   border-radius: var(--radius-sm);
   background: rgba(255, 255, 255, 0.04);
   border: 1px solid rgba(255, 255, 255, 0.07);
+  cursor: pointer;
   transition: border-color 0.22s, background 0.22s, transform 0.22s var(--ease), box-shadow 0.22s;
 }
-.recent-game:hover {
-  background: rgba(61, 158, 255, 0.08);
-  border-color: rgba(61, 158, 255, 0.22);
-  transform: translateY(-1px);
-  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.28);
+.recent-game:hover,
+.recent-game:focus-visible {
+  background: rgba(61, 158, 255, 0.1);
+  border-color: rgba(61, 158, 255, 0.35);
+  transform: translateY(-2px);
+  box-shadow: 0 8px 22px rgba(0, 0, 0, 0.32), 0 0 0 1px rgba(61, 158, 255, 0.15);
+  outline: none;
+}
+.recent-game:active { transform: translateY(0) scale(0.99); }
+
+/* Протокол матча в модальном окне */
+.box-head { display: block; padding-right: 40px; }
+.box-scoreboard {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  width: 100%;
+}
+.box-side {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-weight: 700;
+  font-size: 1.05rem;
+}
+.box-side img { width: 48px; height: 48px; object-fit: contain; }
+.box-side strong {
+  font-size: 1.8rem;
+  font-variant-numeric: tabular-nums;
+  color: var(--accent-2);
+  min-width: 1.2em;
+  text-align: center;
+}
+.box-side--home { flex-direction: row; }
+.box-mid {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  flex: none;
+}
+
+.box-goals { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
+.box-goal {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 12px;
+  border-radius: var(--radius-sm);
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+}
+.box-goal__shot {
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  object-fit: cover;
+  background: rgba(255, 255, 255, 0.08);
+  flex: none;
+}
+.box-goal__body { flex: 1; min-width: 0; }
+.box-goal__main {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 10px;
+  color: #fff;
+}
+.box-goal__team {
+  font-size: 0.75rem;
+  font-weight: 700;
+  color: var(--accent);
+  text-transform: uppercase;
+}
+.box-goal__str {
+  font-size: 0.68rem;
+  font-weight: 700;
+  color: var(--text-muted);
+  padding: 1px 7px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  text-transform: uppercase;
+}
+.box-goal__assists { margin-top: 2px; font-size: 0.8rem; color: var(--text-muted); }
+.box-goal__meta {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 2px;
+  flex: none;
+  font-variant-numeric: tabular-nums;
+}
+.box-goal__time { font-size: 0.78rem; color: var(--text-muted); }
+.box-goal__score { font-weight: 800; color: var(--accent-2); }
+
+.box-stars { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
+.box-star {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 10px;
+  border-radius: var(--radius-sm);
+  background: rgba(255, 255, 255, 0.04);
+}
+.box-star__n {
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  font-weight: 800;
+  font-size: 0.85rem;
+  color: #0a1018;
+  background: linear-gradient(135deg, #ffd54a, #ff8a3d);
+  flex: none;
+}
+.box-star img {
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  object-fit: cover;
+  background: rgba(255, 255, 255, 0.08);
 }
 
 .recent-game__teams {
@@ -1089,8 +1245,17 @@ body.modal-open { overflow: hidden; }
   .ovi__goals-num { font-size: 2.2rem; }
   .ovi__chase { padding: 12px; }
   .ovi__chase-head { font-size: 0.84rem; flex-wrap: wrap; }
+  .ovi__goals-row { gap: 12px; }
   .recent-games__grid { grid-template-columns: 1fr; }
-  .recent-game:hover { transform: none; }
+  .recent-game:hover,
+  .recent-game:focus-visible { transform: none; }
+
+  .box-scoreboard { flex-wrap: wrap; justify-content: center; gap: 10px; }
+  .box-side { font-size: 0.95rem; }
+  .box-side strong { font-size: 1.45rem; }
+  .box-side img { width: 40px; height: 40px; }
+  .box-goal { gap: 8px; padding: 8px 10px; }
+  .box-goal__meta { font-size: 0.85rem; }
 }
 
 @media (max-width: 420px) {
