@@ -134,13 +134,6 @@ async function fetchJson(url, validate = () => {}) {
   return data;
 }
 
-/** Главная страница: один пакет standings + ovechkin + schedule. */
-function fetchHomeBundle() {
-  return fetchJson(WORKER_URL, (data) => {
-    if (!data || typeof data !== 'object') throw new Error('Пустой ответ воркера');
-  });
-}
-
 /** Разница шайб со знаком и цветом. */
 function formatDiff(diff) {
   const cls = diff > 0 ? 'diff-pos' : diff < 0 ? 'diff-neg' : '';
@@ -240,23 +233,24 @@ function renderConference(tbody, teams, conference) {
     </tr>`).join('');
 }
 
-/** Блок 4: топ бомбардиров. */
+/** Блок 4: топ бомбардиров. Пустой или битый список не роняет страницу. */
 function renderScorers(players) {
-  if (!players.length) {
+  const list = Array.isArray(players) ? players.filter((p) => p && (p.id != null || p.name)) : [];
+  if (!list.length) {
     dom.scorersBody.innerHTML = '<tr><td class="empty" colspan="7">Пока нет данных о бомбардирах.</td></tr>';
     return;
   }
 
-  dom.scorersBody.innerHTML = players.map((p, i) => `
+  dom.scorersBody.innerHTML = list.map((p, i) => `
     <tr class="clickable ${PARTICIPANTS[p.team] ? 'is-ours' : ''}" data-player="${esc(p.id)}"
         tabindex="0" role="button" aria-label="Подробнее об игроке ${esc(p.name)}">
       <td class="num">${i + 1}</td>
-      <td>${esc(p.name)}</td>
+      <td>${esc(p.name ?? '—')}</td>
       <td>${teamCell(p.team, p.team, true)}</td>
-      <td class="num">${p.gp}</td>
-      <td class="num">${p.goals}</td>
-      <td class="num">${p.assists}</td>
-      <td class="num pts">${p.points}</td>
+      <td class="num">${p.gp ?? '—'}</td>
+      <td class="num">${p.goals ?? '—'}</td>
+      <td class="num">${p.assists ?? '—'}</td>
+      <td class="num pts">${p.points ?? '—'}</td>
     </tr>`).join('');
 }
 
@@ -266,10 +260,88 @@ function renderScorers(players) {
 function teamsFromStandings(data) {
   const rows = data?.standings;
   if (!Array.isArray(rows) || !rows.length) return null;
-  return {
-    teams: rows.map(normalizeTeam),
-    seasonId: rows[0].seasonId,
+  const teams = [];
+  for (const row of rows) {
+    try {
+      if (!row?.teamAbbrev?.default) continue;
+      teams.push(normalizeTeam(row));
+    } catch (error) {
+      console.warn('Строка таблицы пропущена:', error);
+    }
+  }
+  if (!teams.length) return null;
+  const seasonId = rows.find((row) => row?.seasonId)?.seasonId;
+  return { teams, seasonId };
+}
+
+/** Имя бомбардира из записи лидеров NHL или плоской строки stats API. */
+function leaderName(row) {
+  if (!row || typeof row !== 'object') return '';
+  if (row.skaterFullName) return String(row.skaterFullName);
+  if (typeof row.name === 'string') return row.name;
+  const first = row.firstName?.default ?? (typeof row.firstName === 'string' ? row.firstName : '');
+  const last = row.lastName?.default ?? (typeof row.lastName === 'string' ? row.lastName : '');
+  return `${first} ${last}`.trim();
+}
+
+/** Аббревиатура команды из разных форм ответа (строка, {default}, "NYR,TBL"). */
+function leaderTeam(row) {
+  const abbrev = row?.teamAbbrev;
+  if (typeof abbrev === 'string' && abbrev) return abbrev;
+  if (abbrev?.default) return String(abbrev.default);
+  if (row?.teamAbbrevs) return String(row.teamAbbrevs).split(',').pop().trim();
+  return '';
+}
+
+/**
+ * Топ бомбардиров из data.leaders пакета.
+ * Берём массив points. Голы и передачи подставляем из тех же строк
+ * или из соседних массивов goals/assists, если воркер их прислал.
+ */
+function playersFromLeaders(leaders) {
+  if (leaders == null) return [];
+  const points = Array.isArray(leaders)
+    ? leaders
+    : Array.isArray(leaders.points)
+      ? leaders.points
+      : Array.isArray(leaders.data)
+        ? leaders.data
+        : null;
+  if (!points) return [];
+
+  const indexById = (rows) => {
+    const map = new Map();
+    if (!Array.isArray(rows)) return map;
+    for (const row of rows) {
+      const id = row?.id ?? row?.playerId;
+      if (id != null) map.set(id, row);
+    }
+    return map;
   };
+  const goalsById = indexById(leaders.goals);
+  const assistsById = indexById(leaders.assists);
+
+  const players = [];
+  for (const row of points.slice(0, TOP_SCORERS_COUNT)) {
+    try {
+      if (!row || typeof row !== 'object') continue;
+      const id = row.id ?? row.playerId;
+      const goalsRow = id != null ? goalsById.get(id) : null;
+      const assistsRow = id != null ? assistsById.get(id) : null;
+      players.push({
+        id,
+        name: leaderName(row) || '—',
+        team: leaderTeam(row),
+        gp: row.gamesPlayed ?? row.gp ?? '—',
+        goals: row.goals ?? goalsRow?.value ?? '—',
+        assists: row.assists ?? assistsRow?.value ?? '—',
+        points: row.points ?? row.value ?? '—',
+      });
+    } catch (error) {
+      console.warn('Бомбардир пропущен:', error);
+    }
+  }
+  return players;
 }
 
 /** Топ-10 бомбардиров (основной источник — stats API). */
@@ -439,9 +511,15 @@ function pluralGoals(n) {
 }
 
 function applyOvechkin(player) {
-  if (!player?.firstName && !player?.playerId) return false;
+  if (!player || typeof player !== 'object') return false;
+  if (!player.firstName && !player.playerId) return false;
   renderOvechkin(player);
   return true;
+}
+
+function showOviPlaceholder() {
+  dom.oviError.hidden = true;
+  dom.oviContent.innerHTML = '<p class="muted">Пока нет данных об Овечкине.</p>';
 }
 
 /** Нормализация матча из /v1/score/{date} в компактный объект для ленты. */
@@ -471,9 +549,17 @@ function normalizeScoreGame(g) {
 function gamesFromSchedule(schedule) {
   const games = Array.isArray(schedule) ? schedule : schedule?.games;
   if (!Array.isArray(games)) return [];
-  return games
-    .filter((g) => g.gameState === 'OFF' || g.gameState === 'FINAL')
-    .map(normalizeScoreGame)
+  const finished = [];
+  for (const game of games) {
+    try {
+      if (!game || (game.gameState !== 'OFF' && game.gameState !== 'FINAL')) continue;
+      if (!game.awayTeam?.abbrev || !game.homeTeam?.abbrev) continue;
+      finished.push(normalizeScoreGame(game));
+    } catch (error) {
+      console.warn('Матч пропущен:', error);
+    }
+  }
+  return finished
     .sort((a, b) => (b.date > a.date ? 1 : b.date < a.date ? -1 : b.id - a.id))
     .slice(0, RECENT_GAMES_LIMIT);
 }
@@ -658,46 +744,76 @@ function renderStandingsFailure() {
   dom.westBody.innerHTML = conf;
 }
 
+/** Один блок падает сам по себе и не мешает отрисовать соседние. */
+function renderBlock(label, draw, onFail) {
+  try {
+    draw();
+  } catch (error) {
+    console.error(`Блок «${label}» не отрисован:`, error);
+    try { onFail(); } catch (fallbackError) {
+      console.error(fallbackError);
+    }
+  }
+}
+
 /**
- * Вкладка NHL: ровно один запрос на корень воркера.
+ * Вкладка NHL: ровно один запрос на корень воркера, без таймаута.
+ * Лоадер скрывается сразу после ответа. Каждый блок парсится отдельно.
  * Протокол матча и карточка игрока здесь не запрашиваются.
  * @param {{ready: Function}} ctx
  * @returns {Promise<{subtitle: string}>}
  */
 async function loadNhl(ctx) {
   let subtitle = 'NHL';
+  let bundle = null;
+
   try {
-    const bundle = await fetchHomeBundle();
+    const response = await fetch(WORKER_URL);
     ctx.ready();
-
-    const table = teamsFromStandings(bundle.standings);
-    if (table) {
-      table.teams.forEach((t) => teamsByAbbrev.set(t.abbrev, t));
-      renderTournament(table.teams);
-      renderConference(dom.eastBody, table.teams, 'E');
-      renderConference(dom.westBody, table.teams, 'W');
-      subtitle = seasonLabel(table.seasonId);
-    } else {
-      renderStandingsFailure();
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const data = await response.json();
+    if (!data || typeof data !== 'object' || Array.isArray(data)) {
+      throw new Error('Пустой ответ воркера');
     }
-
-    if (applyOvechkin(bundle.ovechkin)) dom.oviError.hidden = true;
-    else {
-      dom.oviError.hidden = false;
-      dom.oviContent.innerHTML = '';
-    }
-
-    renderRecentGames(gamesFromSchedule(bundle.schedule));
-    dom.recentError.hidden = true;
+    bundle = data;
   } catch (error) {
     console.error(error);
     ctx.ready();
-    renderStandingsFailure();
-    dom.oviError.hidden = false;
-    dom.oviContent.innerHTML = '';
-    dom.recentError.hidden = false;
-    dom.recentGames.innerHTML = '';
   }
+
+  renderBlock('standings', () => {
+    const table = teamsFromStandings(bundle?.standings);
+    if (!table) {
+      renderStandingsFailure();
+      return;
+    }
+    table.teams.forEach((t) => teamsByAbbrev.set(t.abbrev, t));
+    renderTournament(table.teams);
+    renderConference(dom.eastBody, table.teams, 'E');
+    renderConference(dom.westBody, table.teams, 'W');
+    if (table.seasonId) subtitle = seasonLabel(table.seasonId);
+  }, renderStandingsFailure);
+
+  renderBlock('leaders', () => {
+    renderScorers(playersFromLeaders(bundle?.leaders));
+    dom.scorersError.hidden = true;
+  }, () => {
+    renderScorers([]);
+    dom.scorersError.hidden = true;
+  });
+
+  renderBlock('ovechkin', () => {
+    if (applyOvechkin(bundle?.ovechkin)) dom.oviError.hidden = true;
+    else showOviPlaceholder();
+  }, showOviPlaceholder);
+
+  renderBlock('schedule', () => {
+    renderRecentGames(gamesFromSchedule(bundle?.schedule));
+    dom.recentError.hidden = true;
+  }, () => {
+    dom.recentError.hidden = true;
+    dom.recentGames.innerHTML = '<p class="muted">Пока нет завершённых матчей.</p>';
+  });
 
   return { subtitle };
 }
