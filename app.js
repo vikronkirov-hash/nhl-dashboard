@@ -79,6 +79,9 @@ const viaWorker = (url) => `${WORKER_URL}?url=${encodeURIComponent(url)}`;
 
 const TOP_SCORERS_COUNT = 10;
 const AUTO_REFRESH_MS = 2 * 60 * 1000;
+/** Спиннер не должен перекрывать страницу дольше этого времени. */
+const LOADER_UNLOCK_MS = 1800;
+const NHL_CACHE_PREFIX = 'sportsHub.nhl.';
 
 /* ---------- DOM ---------- */
 
@@ -123,8 +126,8 @@ const esc = (value) =>
   ));
 
 /**
- * JSON по прямому адресу, без искусственного таймаута.
- * Для кликов по матчу и игроку адрес уже обёрнут в viaWorker.
+ * JSON по прямому адресу, без искусственного таймаута запроса.
+ * Для кликов и вкладок адрес уже обёрнут в viaWorker.
  */
 async function fetchJson(url, validate = () => {}) {
   const response = await fetch(url);
@@ -132,6 +135,48 @@ async function fetchJson(url, validate = () => {}) {
   const data = await response.json();
   validate(data);
   return data;
+}
+
+function readNhlCache(key) {
+  try {
+    const raw = localStorage.getItem(NHL_CACHE_PREFIX + key);
+    if (!raw) return null;
+    return JSON.parse(raw);
+  } catch {
+    return null;
+  }
+}
+
+function writeNhlCache(key, data) {
+  try {
+    localStorage.setItem(NHL_CACHE_PREFIX + key, JSON.stringify(data));
+  } catch (error) {
+    console.warn('Не удалось сохранить данные в localStorage:', error);
+  }
+}
+
+/**
+ * Запрос к NHL через воркер (?url=). Если сеть на телефоне моргнула —
+ * показываем последний успешно сохранённый ответ.
+ */
+async function fetchViaWorkerCached(key, apiUrl, validate = () => {}) {
+  try {
+    const data = await fetchJson(viaWorker(apiUrl), validate);
+    writeNhlCache(key, data);
+    return data;
+  } catch (error) {
+    const cached = readNhlCache(key);
+    if (cached != null) {
+      try {
+        validate(cached);
+        console.warn(`Сеть недоступна, показаны сохранённые данные «${key}»`, error);
+        return cached;
+      } catch (invalid) {
+        console.warn('Сохранённые данные повреждены:', invalid);
+      }
+    }
+    throw error;
+  }
 }
 
 /** Разница шайб со знаком и цветом. */
@@ -756,46 +801,64 @@ function renderBlock(label, draw, onFail) {
   }
 }
 
+/** Отрисовка турнира и конференций. Возвращает подпись сезона или null. */
+function renderStandingsPayload(data) {
+  const table = teamsFromStandings(data);
+  if (!table) {
+    renderStandingsFailure();
+    return null;
+  }
+  table.teams.forEach((t) => teamsByAbbrev.set(t.abbrev, t));
+  renderTournament(table.teams);
+  renderConference(dom.eastBody, table.teams, 'E');
+  renderConference(dom.westBody, table.teams, 'W');
+  return table.seasonId ? seasonLabel(table.seasonId) : null;
+}
+
 /**
- * Вкладка NHL: ровно один запрос на корень воркера, без таймаута.
- * Лоадер скрывается сразу после ответа. Каждый блок парсится отдельно.
- * Протокол матча и карточка игрока здесь не запрашиваются.
+ * Вкладка NHL. Каждый эндпоинт идёт через viaWorker (?url=):
+ * корень воркера без параметра отвечает HTTP 400.
+ * Таблица рисуется первой и сразу снимает лоадер. Остальные блоки
+ * не ждут друг друга. Протокол матча здесь не запрашивается.
  * @param {{ready: Function}} ctx
  * @returns {Promise<{subtitle: string}>}
  */
 async function loadNhl(ctx) {
   let subtitle = 'NHL';
-  let bundle = null;
+  let unlocked = false;
+  const unlock = () => {
+    if (unlocked) return;
+    unlocked = true;
+    try { ctx.ready(); } catch (error) { console.error(error); }
+    dom.loader.classList.add('is-hidden');
+  };
+  const unlockTimer = setTimeout(unlock, LOADER_UNLOCK_MS);
+
+  const standingsTask = fetchViaWorkerCached('standings', API.standings, (data) => {
+    if (!Array.isArray(data?.standings)) throw new Error('Некорректная турнирная таблица');
+  });
 
   try {
-    const response = await fetch(WORKER_URL);
-    ctx.ready();
-    if (!response.ok) throw new Error(`HTTP ${response.status}`);
-    const data = await response.json();
-    if (!data || typeof data !== 'object' || Array.isArray(data)) {
-      throw new Error('Пустой ответ воркера');
-    }
-    bundle = data;
+    const standings = await standingsTask;
+    renderBlock('standings', () => {
+      const label = renderStandingsPayload(standings);
+      if (label) subtitle = label;
+    }, renderStandingsFailure);
   } catch (error) {
     console.error(error);
-    ctx.ready();
+    renderStandingsFailure();
   }
+  unlock();
 
-  renderBlock('standings', () => {
-    const table = teamsFromStandings(bundle?.standings);
-    if (!table) {
-      renderStandingsFailure();
-      return;
-    }
-    table.teams.forEach((t) => teamsByAbbrev.set(t.abbrev, t));
-    renderTournament(table.teams);
-    renderConference(dom.eastBody, table.teams, 'E');
-    renderConference(dom.westBody, table.teams, 'W');
-    if (table.seasonId) subtitle = seasonLabel(table.seasonId);
-  }, renderStandingsFailure);
+  const [leadersResult, oviResult, scheduleResult] = await Promise.allSettled([
+    fetchViaWorkerCached('leaders', API.leaders),
+    fetchViaWorkerCached('ovechkin', API.player(OVECHKIN_ID)),
+    fetchViaWorkerCached('schedule', API.scoreNow),
+  ]);
 
   renderBlock('leaders', () => {
-    renderScorers(playersFromLeaders(bundle?.leaders));
+    const data = leadersResult.status === 'fulfilled' ? leadersResult.value : null;
+    renderScorers(playersFromLeaders(data));
     dom.scorersError.hidden = true;
   }, () => {
     renderScorers([]);
@@ -803,18 +866,22 @@ async function loadNhl(ctx) {
   });
 
   renderBlock('ovechkin', () => {
-    if (applyOvechkin(bundle?.ovechkin)) dom.oviError.hidden = true;
+    const data = oviResult.status === 'fulfilled' ? oviResult.value : null;
+    if (applyOvechkin(data)) dom.oviError.hidden = true;
     else showOviPlaceholder();
   }, showOviPlaceholder);
 
   renderBlock('schedule', () => {
-    renderRecentGames(gamesFromSchedule(bundle?.schedule));
+    const data = scheduleResult.status === 'fulfilled' ? scheduleResult.value : null;
+    renderRecentGames(gamesFromSchedule(data));
     dom.recentError.hidden = true;
   }, () => {
     dom.recentError.hidden = true;
     dom.recentGames.innerHTML = '<p class="muted">Пока нет завершённых матчей.</p>';
   });
 
+  clearTimeout(unlockTimer);
+  unlock();
   return { subtitle };
 }
 
