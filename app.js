@@ -19,10 +19,8 @@ const PARTICIPANTS = {
 
 const API = {
   standings: 'https://api-web.nhle.com/v1/standings/now',
-  // Основной источник бомбардиров: сводная статистика с G, A, GP и сортировкой по очкам
-  skaterSummary: 'https://api.nhle.com/stats/rest/en/skater/summary',
-  // Запасной вариант: лидеры по очкам + карточки игроков
-  leaders: 'https://api-web.nhle.com/v1/skater-stats-leaders/current',
+  // Бомбардиры: один ответ, имена и очки уже внутри points
+  leaders: 'https://api-web.nhle.com/v1/skater-stats-leaders/current?categories=points&limit=10',
   player: (id) => `https://api-web.nhle.com/v1/player/${id}/landing`,
   // Расписание/результаты клуба за сезон и статистика игроков клуба (для окна команды)
   clubSchedule: (abbrev) => `https://api-web.nhle.com/v1/club-schedule-season/${abbrev}/now`,
@@ -45,7 +43,7 @@ const STRENGTH_RU = { ev: 'равн.', pp: 'бол-во', sh: 'мен-во', en:
 
 /**
  * Источник данных для NBA и Лиги чемпионов — публичное API ESPN (ключ не нужен).
- * Запросы идут через открытые CORS-прокси (см. viaWorker и fetchJsonSafe).
+ * Запросы идут напрямую в API, а если браузер режет CORS — через corsproxy.io.
  */
 const ESPN = {
   // Таблица НБА: season — год окончания сезона (2027 = 2026-27), seasontype=2 — регулярный сезон
@@ -67,13 +65,13 @@ const ESPN = {
 const LEAGUE_STORAGE_KEY = 'sportsHub.activeLeague';
 
 /**
- * Открытые CORS-прокси: api-web.nhle.com и ESPN не отдают CORS-заголовки,
- * а домен workers.dev у части провайдеров недоступен без VPN.
- * Основной — allorigins, резервный — corsproxy.io.
+ * Транспорт данных. Сначала прямой запрос к API и быстрый corsproxy.io
+ * идут одновременно: берём тот, что ответил первым. allorigins не используем.
+ * Если оба не уложились в 3.5 с — один резервный заход через proxy.cors.sh.
  */
-const PROXY_TIMEOUT_MS = 2500;
-const viaWorker = (url) => `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`;
-const viaFallbackProxy = (url) => `https://corsproxy.io/?url=${encodeURIComponent(url)}`;
+const PROXY_TIMEOUT_MS = 3500;
+const viaCorsProxy = (url) => `https://corsproxy.io/?url=${encodeURIComponent(url)}`;
+const viaCorsSh = (url) => `https://proxy.cors.sh/${url}`;
 
 const TOP_SCORERS_COUNT = 10;
 const AUTO_REFRESH_MS = 2 * 60 * 1000;
@@ -123,12 +121,14 @@ const esc = (value) =>
     { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch]
   ));
 
-/** Один запрос через прокси. Дольше PROXY_TIMEOUT_MS не ждём — сразу отдаём ошибку наверх. */
-async function fetchJsonOnce(proxyUrl) {
+/** Один адрес. Дольше 3.5 с не ждём. */
+async function fetchJsonOnce(targetUrl, signal) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), PROXY_TIMEOUT_MS);
+  const onAbort = () => controller.abort();
+  signal?.addEventListener('abort', onAbort, { once: true });
   try {
-    const response = await fetch(proxyUrl, { signal: controller.signal });
+    const response = await fetch(targetUrl, { signal: controller.signal });
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     return await response.json();
   } catch (error) {
@@ -136,30 +136,36 @@ async function fetchJsonOnce(proxyUrl) {
     throw error;
   } finally {
     clearTimeout(timer);
+    signal?.removeEventListener('abort', onAbort);
+  }
+}
+
+/** Первый успешный ответ. Остальные попытки обрываются, чтобы не ждать медленный канал. */
+async function fetchFirstOk(urls) {
+  const stop = new AbortController();
+  try {
+    return await Promise.any(urls.map((url) => fetchJsonOnce(url, stop.signal)));
+  } finally {
+    stop.abort();
   }
 }
 
 /**
- * JSON через CORS-прокси. Сначала allorigins; при ошибке или таймауте 2.5 с
- * сразу повторяет тот же адрес через corsproxy.io.
- * @param {string} url исходный URL API, без прокси
+ * JSON: прямой запрос и corsproxy.io стартуют вместе.
+ * Резерв proxy.cors.sh — только если оба не ответили за 3.5 с.
+ * @param {string} url исходный URL API
  */
 async function fetchJsonSafe(url, validate = () => {}) {
-  const targets = [viaWorker(url), viaFallbackProxy(url)];
-  let lastError;
-  for (let i = 0; i < targets.length; i++) {
-    try {
-      const data = await fetchJsonOnce(targets[i]);
-      validate(data);
-      return data;
-    } catch (error) {
-      lastError = error;
-      if (i < targets.length - 1) {
-        console.warn('Основной прокси не ответил, переключаюсь на corsproxy.io:', error);
-      }
-    }
+  try {
+    const data = await fetchFirstOk([url, viaCorsProxy(url)]);
+    validate(data);
+    return data;
+  } catch (error) {
+    console.warn('Прямой запрос и corsproxy.io не ответили, пробуем proxy.cors.sh:', error);
+    const data = await fetchJsonOnce(viaCorsSh(url));
+    validate(data);
+    return data;
   }
-  throw lastError;
 }
 
 function readNhlCache(key) {
@@ -388,64 +394,6 @@ function playersFromLeaders(leaders) {
     }
   }
   return players;
-}
-
-/** Топ-10 бомбардиров (основной источник — stats API). */
-async function loadScorersPrimary(seasonId) {
-  const sort = JSON.stringify([
-    { property: 'points', direction: 'DESC' },
-    { property: 'goals', direction: 'DESC' },
-    { property: 'assists', direction: 'DESC' },
-  ]);
-  const params = new URLSearchParams({
-    limit: String(TOP_SCORERS_COUNT),
-    start: '0',
-    sort,
-    cayenneExp: `seasonId=${seasonId} and gameTypeId=2`, // gameTypeId=2 — регулярный чемпионат
-  });
-  const { data } = await fetchJsonSafe(`${API.skaterSummary}?${params}`, (d) => {
-    if (!Array.isArray(d?.data)) throw new Error('Некорректный ответ статистики игроков');
-  });
-
-  return data.map((p) => ({
-    id: p.playerId,
-    name: p.skaterFullName,
-    // У обменянных игроков может быть несколько команд ("NYR,TBL") — берём последнюю
-    team: String(p.teamAbbrevs).split(',').pop().trim(),
-    gp: p.gamesPlayed,
-    goals: p.goals,
-    assists: p.assists,
-    points: p.points,
-  }));
-}
-
-/** Запасной путь: лидеры по очкам + статистика каждого игрока из его карточки. */
-async function loadScorersFallback() {
-  const { points } = await fetchJsonSafe(`${API.leaders}?categories=points&limit=${TOP_SCORERS_COUNT}`, (d) => {
-    if (!Array.isArray(d?.points)) throw new Error('Некорректный ответ лидеров');
-  });
-  return Promise.all(points.map(async (p) => {
-    const landing = await fetchJsonSafe(API.player(p.id));
-    const season = landing.featuredStats?.regularSeason?.subSeason ?? {};
-    return {
-      id: p.id,
-      name: `${p.firstName.default} ${p.lastName.default}`,
-      team: p.teamAbbrev,
-      gp: season.gamesPlayed ?? '—',
-      goals: season.goals ?? '—',
-      assists: season.assists ?? '—',
-      points: p.value,
-    };
-  }));
-}
-
-async function loadScorers(seasonId) {
-  try {
-    return await loadScorersPrimary(seasonId);
-  } catch (primaryError) {
-    console.warn('Основной источник бомбардиров недоступен, пробуем запасной:', primaryError);
-    return loadScorersFallback();
-  }
 }
 
 /* ---------- Состояние UI ---------- */
@@ -825,7 +773,13 @@ const NHL_HOME = [
       if (!Array.isArray(data?.standings)) throw new Error('Некорректная турнирная таблица');
     },
   },
-  { key: 'leaders', url: API.leaders },
+  {
+    key: 'leaders',
+    url: API.leaders,
+    validate: (data) => {
+      if (!Array.isArray(data?.points)) throw new Error('Некорректный ответ бомбардиров');
+    },
+  },
   { key: 'ovechkin', url: API.player(OVECHKIN_ID) },
   { key: 'schedule', url: API.scoreNow },
 ];
