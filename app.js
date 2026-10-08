@@ -45,7 +45,7 @@ const STRENGTH_RU = { ev: 'равн.', pp: 'бол-во', sh: 'мен-во', en:
 
 /**
  * Источник данных для NBA и Лиги чемпионов — публичное API ESPN (ключ не нужен).
- * Запросы идут через тот же воркер, что и для NHL (см. viaWorker).
+ * Запросы идут через открытые CORS-прокси (см. viaWorker и fetchJsonSafe).
  */
 const ESPN = {
   // Таблица НБА: season — год окончания сезона (2027 = 2026-27), seasontype=2 — регулярный сезон
@@ -67,15 +67,13 @@ const ESPN = {
 const LEAGUE_STORAGE_KEY = 'sportsHub.activeLeague';
 
 /**
- * Собственный Cloudflare Worker, проксирующий запросы к внешним API (NHL, ESPN).
- * Эти API не отдают CORS-заголовки, поэтому браузер блокирует прямые запросы
- * (например, с GitHub Pages). Все запросы идут в виде:
- *   WORKER_URL?url=<закодированный оригинальный URL>
+ * Открытые CORS-прокси: api-web.nhle.com и ESPN не отдают CORS-заголовки,
+ * а домен workers.dev у части провайдеров недоступен без VPN.
+ * Основной — allorigins, резервный — corsproxy.io.
  */
-const WORKER_URL = 'https://nhl-proxy.vikronkirov.workers.dev/';
-
-/** Оборачивает URL API NHL в запрос к воркеру. */
-const viaWorker = (url) => `${WORKER_URL}?url=${encodeURIComponent(url)}`;
+const PROXY_TIMEOUT_MS = 4000;
+const viaWorker = (url) => `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`;
+const viaFallbackProxy = (url) => `https://corsproxy.io/?url=${encodeURIComponent(url)}`;
 
 const TOP_SCORERS_COUNT = 10;
 const AUTO_REFRESH_MS = 2 * 60 * 1000;
@@ -125,16 +123,43 @@ const esc = (value) =>
     { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch]
   ));
 
+/** Один запрос через прокси. Дольше PROXY_TIMEOUT_MS не ждём — сразу отдаём ошибку наверх. */
+async function fetchJsonOnce(proxyUrl) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), PROXY_TIMEOUT_MS);
+  try {
+    const response = await fetch(proxyUrl, { signal: controller.signal });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    return await response.json();
+  } catch (error) {
+    if (error?.name === 'AbortError') throw new Error(`Таймаут ${PROXY_TIMEOUT_MS / 1000} с`);
+    throw error;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 /**
- * JSON по прямому адресу, без искусственного таймаута запроса.
- * Для кликов и вкладок адрес уже обёрнут в viaWorker.
+ * JSON через CORS-прокси. Сначала allorigins; при ошибке или таймауте 4 с
+ * сразу повторяет тот же адрес через corsproxy.io.
+ * @param {string} url исходный URL API, без прокси
  */
-async function fetchJson(url, validate = () => {}) {
-  const response = await fetch(url);
-  if (!response.ok) throw new Error(`HTTP ${response.status}`);
-  const data = await response.json();
-  validate(data);
-  return data;
+async function fetchJsonSafe(url, validate = () => {}) {
+  const targets = [viaWorker(url), viaFallbackProxy(url)];
+  let lastError;
+  for (let i = 0; i < targets.length; i++) {
+    try {
+      const data = await fetchJsonOnce(targets[i]);
+      validate(data);
+      return data;
+    } catch (error) {
+      lastError = error;
+      if (i < targets.length - 1) {
+        console.warn('Основной прокси не ответил, переключаюсь на corsproxy.io:', error);
+      }
+    }
+  }
+  throw lastError;
 }
 
 function readNhlCache(key) {
@@ -156,12 +181,12 @@ function writeNhlCache(key, data) {
 }
 
 /**
- * Запрос к NHL через воркер (?url=). Если сеть на телефоне моргнула —
+ * Запрос к NHL через CORS-прокси. Если сеть на телефоне моргнула —
  * показываем последний успешно сохранённый ответ.
  */
 async function fetchViaWorkerCached(key, apiUrl, validate = () => {}) {
   try {
-    const data = await fetchJson(viaWorker(apiUrl), validate);
+    const data = await fetchJsonSafe(apiUrl, validate);
     writeNhlCache(key, data);
     return data;
   } catch (error) {
@@ -402,7 +427,7 @@ async function loadScorersPrimary(seasonId) {
     sort,
     cayenneExp: `seasonId=${seasonId} and gameTypeId=2`, // gameTypeId=2 — регулярный чемпионат
   });
-  const { data } = await fetchJson(viaWorker(`${API.skaterSummary}?${params}`), (d) => {
+  const { data } = await fetchJsonSafe(`${API.skaterSummary}?${params}`, (d) => {
     if (!Array.isArray(d?.data)) throw new Error('Некорректный ответ статистики игроков');
   });
 
@@ -420,11 +445,11 @@ async function loadScorersPrimary(seasonId) {
 
 /** Запасной путь: лидеры по очкам + статистика каждого игрока из его карточки. */
 async function loadScorersFallback() {
-  const { points } = await fetchJson(viaWorker(`${API.leaders}?categories=points&limit=${TOP_SCORERS_COUNT}`), (d) => {
+  const { points } = await fetchJsonSafe(`${API.leaders}?categories=points&limit=${TOP_SCORERS_COUNT}`, (d) => {
     if (!Array.isArray(d?.points)) throw new Error('Некорректный ответ лидеров');
   });
   return Promise.all(points.map(async (p) => {
-    const landing = await fetchJson(viaWorker(API.player(p.id)));
+    const landing = await fetchJsonSafe(API.player(p.id));
     const season = landing.featuredStats?.regularSeason?.subSeason ?? {};
     return {
       id: p.id,
@@ -758,13 +783,13 @@ async function openGame(gameId) {
   showModal(loadingHtml('Загружаем статистику матча…'));
 
   try {
-    const landing = await cachedJson(viaWorker(API.gameLanding(gameId)), (d) => {
+    const landing = await cachedJson(API.gameLanding(gameId), (d) => {
       if (!d?.id || !d?.awayTeam || !d?.homeTeam) throw new Error('Некорректный ответ матча');
     });
     // Если в landing нет SOG — подстрахуемся boxscore
     if (landing.awayTeam.sog == null || landing.homeTeam.sog == null) {
       try {
-        const box = await cachedJson(viaWorker(API.gameBoxscore(gameId)));
+        const box = await cachedJson(API.gameBoxscore(gameId));
         landing.awayTeam.sog ??= box.awayTeam?.sog;
         landing.homeTeam.sog ??= box.homeTeam?.sog;
         landing.gameOutcome ??= box.gameOutcome;
@@ -816,8 +841,7 @@ function renderStandingsPayload(data) {
 }
 
 /**
- * Вкладка NHL. Каждый эндпоинт идёт через viaWorker (?url=):
- * корень воркера без параметра отвечает HTTP 400.
+ * Вкладка NHL. Каждый эндпоинт идёт через fetchJsonSafe (allorigins, затем corsproxy.io).
  * Таблица рисуется первой и сразу снимает лоадер. Остальные блоки
  * не ждут друг друга. Протокол матча здесь не запрашивается.
  * @param {{ready: Function}} ctx
@@ -964,14 +988,14 @@ async function loadNbaStandings() {
   };
 
   let year = currentNbaSeasonYear();
-  let table = parseNbaStandings(await fetchJson(viaWorker(ESPN.nbaStandings(year)), validate));
+  let table = parseNbaStandings(await fetchJsonSafe(ESPN.nbaStandings(year), validate));
   let fallback = false;
 
   const gamesPlayed = [...table.E, ...table.W].reduce((sum, t) => sum + t.gp, 0);
   if (gamesPlayed === 0) {
     fallback = true;
     year -= 1;
-    table = parseNbaStandings(await fetchJson(viaWorker(ESPN.nbaStandings(year)), validate));
+    table = parseNbaStandings(await fetchJsonSafe(ESPN.nbaStandings(year), validate));
   }
   return { table, year, fallback };
 }
@@ -981,10 +1005,10 @@ async function loadNbaScorers(year) {
   const validate = (d) => { if (!d || typeof d !== 'object') throw new Error('Пустой ответ НБА'); };
 
   let usedYear = year;
-  let data = await fetchJson(viaWorker(ESPN.nbaLeaders(usedYear)), validate);
+  let data = await fetchJsonSafe(ESPN.nbaLeaders(usedYear), validate);
   if (!data.athletes?.length) {
     usedYear -= 1;
-    data = await fetchJson(viaWorker(ESPN.nbaLeaders(usedYear)), validate);
+    data = await fetchJsonSafe(ESPN.nbaLeaders(usedYear), validate);
   }
 
   // Значения лежат в массивах по категориям; имена статистик описаны в data.categories
@@ -1102,7 +1126,7 @@ function renderUclTable(teams) {
 async function uclPlayerName(year, id) {
   if (uclPlayerNames.has(id)) return uclPlayerNames.get(id);
   try {
-    const athlete = await fetchJson(viaWorker(ESPN.uclAthlete(year, id)), (d) => { if (!d?.displayName) throw new Error('bad athlete'); });
+    const athlete = await fetchJsonSafe(ESPN.uclAthlete(year, id), (d) => { if (!d?.displayName) throw new Error('bad athlete'); });
     uclPlayerNames.set(id, athlete.displayName);
     return athlete.displayName;
   } catch (error) {
@@ -1112,7 +1136,7 @@ async function uclPlayerName(year, id) {
 }
 
 async function loadUclScorers(year, teams) {
-  const data = await fetchJson(viaWorker(ESPN.uclLeaders(year)), (d) => {
+  const data = await fetchJsonSafe(ESPN.uclLeaders(year), (d) => {
     if (!Array.isArray(d?.categories)) throw new Error('Некорректный ответ лидеров ЛЧ');
   });
   const goals = data.categories.find((c) => c.name === 'goalsLeaders')?.leaders ?? [];
@@ -1155,7 +1179,7 @@ function renderUclScorers(players) {
 }
 
 async function loadUcl(ctx) {
-  const data = await fetchJson(viaWorker(ESPN.uclStandings), (d) => {
+  const data = await fetchJsonSafe(ESPN.uclStandings, (d) => {
     if (!d?.children?.[0]?.standings?.entries?.length) throw new Error('Пустая таблица Лиги чемпионов');
   });
   const teams = parseUclStandings(data);
@@ -1202,7 +1226,7 @@ const modalCache = new Map();
 async function cachedJson(url, validate) {
   const hit = modalCache.get(url);
   if (hit && Date.now() - hit.time < MODAL_CACHE_TTL_MS) return hit.data;
-  const data = await fetchJson(url, validate);
+  const data = await fetchJsonSafe(url, validate);
   modalCache.set(url, { data, time: Date.now() });
   return data;
 }
@@ -1424,14 +1448,14 @@ function openTeam(abbrev) {
   };
 
   // Расписание и статистика грузятся параллельно и независимо друг от друга
-  cachedJson(viaWorker(API.clubSchedule(abbrev)), (d) => { if (!Array.isArray(d?.games)) throw new Error('bad schedule'); })
+  cachedJson(API.clubSchedule(abbrev), (d) => { if (!Array.isArray(d?.games)) throw new Error('bad schedule'); })
     .then((data) => { if (token === modal.token) fillSchedule(team, data.games); })
     .catch((e) => {
       console.error(e);
       ['form', 'results', 'next'].forEach((s) => slotError(s, 'Не удалось загрузить расписание.'));
     });
 
-  cachedJson(viaWorker(API.clubStats(abbrev)), (d) => { if (!Array.isArray(d?.skaters)) throw new Error('bad stats'); })
+  cachedJson(API.clubStats(abbrev), (d) => { if (!Array.isArray(d?.skaters)) throw new Error('bad stats'); })
     .then((data) => { if (token === modal.token) fillLeaders(data); })
     .catch((e) => { console.error(e); slotError('leaders', 'Не удалось загрузить статистику игроков.'); });
 }
@@ -1525,7 +1549,7 @@ async function openPlayer(id, { backTo = '' } = {}) {
   showModal(loadingHtml('Загружаем карточку игрока…'));
 
   try {
-    const player = await cachedJson(viaWorker(API.player(id)), (d) => { if (!d?.firstName) throw new Error('bad player'); });
+    const player = await cachedJson(API.player(id), (d) => { if (!d?.firstName) throw new Error('bad player'); });
     if (token !== modal.token) return;       // окно уже закрыли или открыли другое
     showModal(playerHtml(player, backTo));
   } catch (error) {
