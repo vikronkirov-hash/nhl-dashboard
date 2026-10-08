@@ -71,7 +71,7 @@ const LEAGUE_STORAGE_KEY = 'sportsHub.activeLeague';
  * а домен workers.dev у части провайдеров недоступен без VPN.
  * Основной — allorigins, резервный — corsproxy.io.
  */
-const PROXY_TIMEOUT_MS = 4000;
+const PROXY_TIMEOUT_MS = 2500;
 const viaWorker = (url) => `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`;
 const viaFallbackProxy = (url) => `https://corsproxy.io/?url=${encodeURIComponent(url)}`;
 
@@ -140,7 +140,7 @@ async function fetchJsonOnce(proxyUrl) {
 }
 
 /**
- * JSON через CORS-прокси. Сначала allorigins; при ошибке или таймауте 4 с
+ * JSON через CORS-прокси. Сначала allorigins; при ошибке или таймауте 2.5 с
  * сразу повторяет тот же адрес через corsproxy.io.
  * @param {string} url исходный URL API, без прокси
  */
@@ -177,30 +177,6 @@ function writeNhlCache(key, data) {
     localStorage.setItem(NHL_CACHE_PREFIX + key, JSON.stringify(data));
   } catch (error) {
     console.warn('Не удалось сохранить данные в localStorage:', error);
-  }
-}
-
-/**
- * Запрос к NHL через CORS-прокси. Если сеть на телефоне моргнула —
- * показываем последний успешно сохранённый ответ.
- */
-async function fetchViaWorkerCached(key, apiUrl, validate = () => {}) {
-  try {
-    const data = await fetchJsonSafe(apiUrl, validate);
-    writeNhlCache(key, data);
-    return data;
-  } catch (error) {
-    const cached = readNhlCache(key);
-    if (cached != null) {
-      try {
-        validate(cached);
-        console.warn(`Сеть недоступна, показаны сохранённые данные «${key}»`, error);
-        return cached;
-      } catch (invalid) {
-        console.warn('Сохранённые данные повреждены:', invalid);
-      }
-    }
-    throw error;
   }
 }
 
@@ -840,10 +816,54 @@ function renderStandingsPayload(data) {
   return table.seasonId ? seasonLabel(table.seasonId) : null;
 }
 
+/** Четыре блока главной: кэш рисуется сразу, сеть обновляет каждый по мере ответа. */
+const NHL_HOME = [
+  {
+    key: 'standings',
+    url: API.standings,
+    validate: (data) => {
+      if (!Array.isArray(data?.standings)) throw new Error('Некорректная турнирная таблица');
+    },
+  },
+  { key: 'leaders', url: API.leaders },
+  { key: 'ovechkin', url: API.player(OVECHKIN_ID) },
+  { key: 'schedule', url: API.scoreNow },
+];
+
+/** Рисует один блок из уже полученных данных. Для standings возвращает подпись сезона. */
+function paintNhlBlock(key, data) {
+  if (key === 'standings') return renderStandingsPayload(data);
+  if (key === 'leaders') {
+    renderScorers(playersFromLeaders(data));
+    dom.scorersError.hidden = true;
+    return null;
+  }
+  if (key === 'ovechkin') {
+    if (applyOvechkin(data)) dom.oviError.hidden = true;
+    else showOviPlaceholder();
+    return null;
+  }
+  renderRecentGames(gamesFromSchedule(data));
+  dom.recentError.hidden = true;
+  return null;
+}
+
+function paintNhlBlockEmpty(key) {
+  if (key === 'standings') renderStandingsFailure();
+  else if (key === 'leaders') {
+    renderScorers([]);
+    dom.scorersError.hidden = true;
+  } else if (key === 'ovechkin') showOviPlaceholder();
+  else {
+    dom.recentError.hidden = true;
+    dom.recentGames.innerHTML = '<p class="muted">Пока нет завершённых матчей.</p>';
+  }
+}
+
 /**
- * Вкладка NHL. Каждый эндпоинт идёт через fetchJsonSafe (allorigins, затем corsproxy.io).
- * Таблица рисуется первой и сразу снимает лоадер. Остальные блоки
- * не ждут друг друга. Протокол матча здесь не запрашивается.
+ * Вкладка NHL. Сначала мгновенно рисуем localStorage, затем четыре запроса
+ * параллельно. Каждый блок обновляется, как только пришёл его ответ.
+ * Протокол матча здесь не запрашивается.
  * @param {{ready: Function}} ctx
  * @returns {Promise<{subtitle: string}>}
  */
@@ -858,51 +878,31 @@ async function loadNhl(ctx) {
   };
   const unlockTimer = setTimeout(unlock, LOADER_UNLOCK_MS);
 
-  const standingsTask = fetchViaWorkerCached('standings', API.standings, (data) => {
-    if (!Array.isArray(data?.standings)) throw new Error('Некорректная турнирная таблица');
-  });
-
-  try {
-    const standings = await standingsTask;
-    renderBlock('standings', () => {
-      const label = renderStandingsPayload(standings);
+  let hadCache = false;
+  for (const source of NHL_HOME) {
+    const cached = readNhlCache(source.key);
+    if (cached == null) continue;
+    hadCache = true;
+    renderBlock(source.key, () => {
+      const label = paintNhlBlock(source.key, cached);
       if (label) subtitle = label;
-    }, renderStandingsFailure);
-  } catch (error) {
-    console.error(error);
-    renderStandingsFailure();
+    }, () => {});
   }
-  unlock();
+  if (hadCache) unlock();
 
-  const [leadersResult, oviResult, scheduleResult] = await Promise.allSettled([
-    fetchViaWorkerCached('leaders', API.leaders),
-    fetchViaWorkerCached('ovechkin', API.player(OVECHKIN_ID)),
-    fetchViaWorkerCached('schedule', API.scoreNow),
-  ]);
-
-  renderBlock('leaders', () => {
-    const data = leadersResult.status === 'fulfilled' ? leadersResult.value : null;
-    renderScorers(playersFromLeaders(data));
-    dom.scorersError.hidden = true;
-  }, () => {
-    renderScorers([]);
-    dom.scorersError.hidden = true;
-  });
-
-  renderBlock('ovechkin', () => {
-    const data = oviResult.status === 'fulfilled' ? oviResult.value : null;
-    if (applyOvechkin(data)) dom.oviError.hidden = true;
-    else showOviPlaceholder();
-  }, showOviPlaceholder);
-
-  renderBlock('schedule', () => {
-    const data = scheduleResult.status === 'fulfilled' ? scheduleResult.value : null;
-    renderRecentGames(gamesFromSchedule(data));
-    dom.recentError.hidden = true;
-  }, () => {
-    dom.recentError.hidden = true;
-    dom.recentGames.innerHTML = '<p class="muted">Пока нет завершённых матчей.</p>';
-  });
+  await Promise.allSettled(NHL_HOME.map(async (source) => {
+    try {
+      const data = await fetchJsonSafe(source.url, source.validate);
+      writeNhlCache(source.key, data);
+      renderBlock(source.key, () => {
+        const label = paintNhlBlock(source.key, data);
+        if (label) subtitle = label;
+      }, () => paintNhlBlockEmpty(source.key));
+    } catch (error) {
+      console.warn(`Блок «${source.key}» не обновился из сети:`, error);
+      if (readNhlCache(source.key) == null) paintNhlBlockEmpty(source.key);
+    }
+  }));
 
   clearTimeout(unlockTimer);
   unlock();
