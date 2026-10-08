@@ -77,9 +77,7 @@ const WORKER_URL = 'https://nhl-proxy.vikronkirov.workers.dev/';
 /** Оборачивает URL API NHL в запрос к воркеру. */
 const viaWorker = (url) => `${WORKER_URL}?url=${encodeURIComponent(url)}`;
 
-const MAX_ATTEMPTS = 2; // первая попытка + один повтор, если запрос не уложился в таймаут
 const TOP_SCORERS_COUNT = 10;
-const REQUEST_TIMEOUT_MS = 6000;
 const AUTO_REFRESH_MS = 2 * 60 * 1000;
 
 /* ---------- DOM ---------- */
@@ -125,48 +123,22 @@ const esc = (value) =>
   ));
 
 /**
- * Один запрос с жёстким таймаутом.
- * Если ответ не пришёл за REQUEST_TIMEOUT_MS — соединение обрывается,
- * а fetchJson делает повторную попытку.
- */
-async function fetchOnce(url) {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
-  try {
-    const response = await fetch(url, { signal: controller.signal });
-    if (!response.ok) throw new Error(`HTTP ${response.status}`);
-    return await response.json();
-  } catch (error) {
-    if (error?.name === 'AbortError') {
-      const timeout = new Error(`Таймаут ${REQUEST_TIMEOUT_MS / 1000} с: ${url}`);
-      timeout.name = 'AbortError';
-      throw timeout;
-    }
-    throw error;
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
-/**
- * Единая точка загрузки JSON: каждый запрос идёт через воркер.
- * При таймауте или сетевой ошибке запрос повторяется ещё один раз.
- * @param {string} url       исходный URL API (без прокси)
- * @param {Function} validate проверка структуры; ошибка тоже запускает повтор
+ * JSON по прямому адресу, без искусственного таймаута.
+ * Для кликов по матчу и игроку адрес уже обёрнут в viaWorker.
  */
 async function fetchJson(url, validate = () => {}) {
-  let lastError;
-  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
-    try {
-      const data = await fetchOnce(viaWorker(url));
-      validate(data);
-      return data;
-    } catch (error) {
-      lastError = error;
-      console.warn(`Запрос не удался (попытка ${attempt}/${MAX_ATTEMPTS}):`, error);
-    }
-  }
-  throw lastError;
+  const response = await fetch(url);
+  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  const data = await response.json();
+  validate(data);
+  return data;
+}
+
+/** Главная страница: один пакет standings + ovechkin + schedule. */
+function fetchHomeBundle() {
+  return fetchJson(WORKER_URL, (data) => {
+    if (!data || typeof data !== 'object') throw new Error('Пустой ответ воркера');
+  });
 }
 
 /** Разница шайб со знаком и цветом. */
@@ -290,16 +262,13 @@ function renderScorers(players) {
 
 /* ---------- Загрузка данных ---------- */
 
-/** Таблицы лиги: возвращает нормализованный массив из 32 команд и id сезона. */
-async function loadStandings() {
-  const data = await fetchJson(API.standings, (d) => {
-    if (!Array.isArray(d?.standings) || !d.standings.length) {
-      throw new Error('Пустой ответ турнирной таблицы');
-    }
-  });
+/** Таблицы лиги из уже полученного пакета воркера (без отдельного запроса). */
+function teamsFromStandings(data) {
+  const rows = data?.standings;
+  if (!Array.isArray(rows) || !rows.length) return null;
   return {
-    teams: data.standings.map(normalizeTeam),
-    seasonId: data.standings[0].seasonId,
+    teams: rows.map(normalizeTeam),
+    seasonId: rows[0].seasonId,
   };
 }
 
@@ -316,7 +285,7 @@ async function loadScorersPrimary(seasonId) {
     sort,
     cayenneExp: `seasonId=${seasonId} and gameTypeId=2`, // gameTypeId=2 — регулярный чемпионат
   });
-  const { data } = await fetchJson(`${API.skaterSummary}?${params}`, (d) => {
+  const { data } = await fetchJson(viaWorker(`${API.skaterSummary}?${params}`), (d) => {
     if (!Array.isArray(d?.data)) throw new Error('Некорректный ответ статистики игроков');
   });
 
@@ -334,11 +303,11 @@ async function loadScorersPrimary(seasonId) {
 
 /** Запасной путь: лидеры по очкам + статистика каждого игрока из его карточки. */
 async function loadScorersFallback() {
-  const { points } = await fetchJson(`${API.leaders}?categories=points&limit=${TOP_SCORERS_COUNT}`, (d) => {
+  const { points } = await fetchJson(viaWorker(`${API.leaders}?categories=points&limit=${TOP_SCORERS_COUNT}`), (d) => {
     if (!Array.isArray(d?.points)) throw new Error('Некорректный ответ лидеров');
   });
   return Promise.all(points.map(async (p) => {
-    const landing = await fetchJson(API.player(p.id));
+    const landing = await fetchJson(viaWorker(API.player(p.id)));
     const season = landing.featuredStats?.regularSeason?.subSeason ?? {};
     return {
       id: p.id,
@@ -469,11 +438,10 @@ function pluralGoals(n) {
   return 'голов';
 }
 
-async function loadOvechkin() {
-  const player = await fetchJson(API.player(OVECHKIN_ID), (d) => {
-    if (!d?.playerId && !d?.firstName) throw new Error('Пустой ответ профиля Овечкина');
-  });
+function applyOvechkin(player) {
+  if (!player?.firstName && !player?.playerId) return false;
   renderOvechkin(player);
+  return true;
 }
 
 /** Нормализация матча из /v1/score/{date} в компактный объект для ленты. */
@@ -499,46 +467,15 @@ function normalizeScoreGame(g) {
   };
 }
 
-/**
- * Последние завершённые матчи.
- * Берём score/now и параллельно несколько предыдущих дней из gameWeek.
- * Детальный протокол (landing/boxscore) здесь НЕ запрашивается — только по клику.
- */
-async function loadRecentGames() {
-  const finished = [];
-  const takeFinished = (payload) => {
-    for (const g of payload.games ?? []) {
-      if (g.gameState === 'OFF' || g.gameState === 'FINAL') finished.push(normalizeScoreGame(g));
-    }
-  };
-
-  const now = await fetchJson(API.scoreNow, (d) => {
-    if (!Array.isArray(d?.games) && !d?.prevDate) throw new Error('Пустой ответ score/now');
-  });
-  takeFinished(now);
-
-  const today = now.currentDate ?? '';
-  const extraDates = [];
-  for (const day of now.gameWeek ?? []) {
-    if (day?.date && today && day.date < today && day.numberOfGames > 0) extraDates.push(day.date);
-  }
-  if (now.prevDate && !extraDates.includes(now.prevDate)) extraDates.push(now.prevDate);
-  // Хватает двух-трёх ближайших дней; запросы идут одновременно, а не очередью
-  const dates = extraDates.slice(-3);
-
-  if (finished.length < RECENT_GAMES_LIMIT && dates.length) {
-    const days = await Promise.allSettled(dates.map((date) =>
-      fetchJson(API.scoreDate(date), (d) => {
-        if (!Array.isArray(d?.games)) throw new Error('Пустой ответ score/date');
-      })));
-    for (const result of days) {
-      if (result.status === 'fulfilled') takeFinished(result.value);
-      else console.warn('День расписания не загрузился:', result.reason);
-    }
-  }
-
-  finished.sort((a, b) => (b.date > a.date ? 1 : b.date < a.date ? -1 : b.id - a.id));
-  return finished.slice(0, RECENT_GAMES_LIMIT);
+/** Завершённые матчи из data.schedule пакета воркера. Дополнительных запросов нет. */
+function gamesFromSchedule(schedule) {
+  const games = Array.isArray(schedule) ? schedule : schedule?.games;
+  if (!Array.isArray(games)) return [];
+  return games
+    .filter((g) => g.gameState === 'OFF' || g.gameState === 'FINAL')
+    .map(normalizeScoreGame)
+    .sort((a, b) => (b.date > a.date ? 1 : b.date < a.date ? -1 : b.id - a.id))
+    .slice(0, RECENT_GAMES_LIMIT);
 }
 
 function renderRecentGames(games) {
@@ -690,13 +627,13 @@ async function openGame(gameId) {
   showModal(loadingHtml('Загружаем статистику матча…'));
 
   try {
-    const landing = await cachedJson(API.gameLanding(gameId), (d) => {
+    const landing = await cachedJson(viaWorker(API.gameLanding(gameId)), (d) => {
       if (!d?.id || !d?.awayTeam || !d?.homeTeam) throw new Error('Некорректный ответ матча');
     });
     // Если в landing нет SOG — подстрахуемся boxscore
     if (landing.awayTeam.sog == null || landing.homeTeam.sog == null) {
       try {
-        const box = await cachedJson(API.gameBoxscore(gameId));
+        const box = await cachedJson(viaWorker(API.gameBoxscore(gameId)));
         landing.awayTeam.sog ??= box.awayTeam?.sog;
         landing.homeTeam.sog ??= box.homeTeam?.sog;
         landing.gameOutcome ??= box.gameOutcome;
@@ -722,84 +659,47 @@ function renderStandingsFailure() {
 }
 
 /**
- * Вкладка NHL: турнир, конференции, Овечкин и лента матчей грузятся параллельно.
- * Падение одного блока (allSettled) не отменяет остальные.
- * Boxscore конкретной игры здесь не запрашивается.
+ * Вкладка NHL: ровно один запрос на корень воркера.
+ * Протокол матча и карточка игрока здесь не запрашиваются.
  * @param {{ready: Function}} ctx
  * @returns {Promise<{subtitle: string}>}
  */
 async function loadNhl(ctx) {
-  let seasonId = null;
-  let readyCalled = false;
-  const readyOnce = () => {
-    if (readyCalled) return;
-    readyCalled = true;
+  let subtitle = 'NHL';
+  try {
+    const bundle = await fetchHomeBundle();
     ctx.ready();
-  };
 
-  const standingsTask = loadStandings()
-    .then((data) => {
-      seasonId = data.seasonId;
-      data.teams.forEach((t) => teamsByAbbrev.set(t.abbrev, t));
-      renderTournament(data.teams);
-      renderConference(dom.eastBody, data.teams, 'E');
-      renderConference(dom.westBody, data.teams, 'W');
-      readyOnce();
-      // Бомбардиры зависят от id сезона и не должны задерживать остальные блоки
-      loadScorers(seasonId)
-        .then((players) => {
-          renderScorers(players);
-          dom.scorersError.hidden = true;
-        })
-        .catch((error) => {
-          console.error(error);
-          dom.scorersError.hidden = false;
-        });
-      return data;
-    })
-    .catch((error) => {
-      console.error(error);
+    const table = teamsFromStandings(bundle.standings);
+    if (table) {
+      table.teams.forEach((t) => teamsByAbbrev.set(t.abbrev, t));
+      renderTournament(table.teams);
+      renderConference(dom.eastBody, table.teams, 'E');
+      renderConference(dom.westBody, table.teams, 'W');
+      subtitle = seasonLabel(table.seasonId);
+    } else {
       renderStandingsFailure();
-      readyOnce();
-      throw error;
-    });
+    }
 
-  const oviTask = loadOvechkin()
-    .then(() => {
-      dom.oviError.hidden = true;
-      readyOnce();
-    })
-    .catch((error) => {
-      console.error(error);
+    if (applyOvechkin(bundle.ovechkin)) dom.oviError.hidden = true;
+    else {
       dom.oviError.hidden = false;
       dom.oviContent.innerHTML = '';
-      readyOnce();
-      throw error;
-    });
+    }
 
-  const recentTask = loadRecentGames()
-    .then((games) => {
-      renderRecentGames(games);
-      dom.recentError.hidden = true;
-      readyOnce();
-    })
-    .catch((error) => {
-      console.error(error);
-      dom.recentError.hidden = false;
-      dom.recentGames.innerHTML = '';
-      readyOnce();
-      throw error;
-    });
-
-  const results = await Promise.allSettled([standingsTask, oviTask, recentTask]);
-  readyOnce();
-
-  // Общий баннер — только если не поднялся ни один блок
-  if (results.every((result) => result.status === 'rejected')) {
-    throw results[0].reason;
+    renderRecentGames(gamesFromSchedule(bundle.schedule));
+    dom.recentError.hidden = true;
+  } catch (error) {
+    console.error(error);
+    ctx.ready();
+    renderStandingsFailure();
+    dom.oviError.hidden = false;
+    dom.oviContent.innerHTML = '';
+    dom.recentError.hidden = false;
+    dom.recentGames.innerHTML = '';
   }
 
-  return { subtitle: seasonId ? seasonLabel(seasonId) : 'NHL' };
+  return { subtitle };
 }
 
 /* ==========================================================================
@@ -881,14 +781,14 @@ async function loadNbaStandings() {
   };
 
   let year = currentNbaSeasonYear();
-  let table = parseNbaStandings(await fetchJson(ESPN.nbaStandings(year), validate));
+  let table = parseNbaStandings(await fetchJson(viaWorker(ESPN.nbaStandings(year)), validate));
   let fallback = false;
 
   const gamesPlayed = [...table.E, ...table.W].reduce((sum, t) => sum + t.gp, 0);
   if (gamesPlayed === 0) {
     fallback = true;
     year -= 1;
-    table = parseNbaStandings(await fetchJson(ESPN.nbaStandings(year), validate));
+    table = parseNbaStandings(await fetchJson(viaWorker(ESPN.nbaStandings(year)), validate));
   }
   return { table, year, fallback };
 }
@@ -898,10 +798,10 @@ async function loadNbaScorers(year) {
   const validate = (d) => { if (!d || typeof d !== 'object') throw new Error('Пустой ответ НБА'); };
 
   let usedYear = year;
-  let data = await fetchJson(ESPN.nbaLeaders(usedYear), validate);
+  let data = await fetchJson(viaWorker(ESPN.nbaLeaders(usedYear)), validate);
   if (!data.athletes?.length) {
     usedYear -= 1;
-    data = await fetchJson(ESPN.nbaLeaders(usedYear), validate);
+    data = await fetchJson(viaWorker(ESPN.nbaLeaders(usedYear)), validate);
   }
 
   // Значения лежат в массивах по категориям; имена статистик описаны в data.categories
@@ -1019,7 +919,7 @@ function renderUclTable(teams) {
 async function uclPlayerName(year, id) {
   if (uclPlayerNames.has(id)) return uclPlayerNames.get(id);
   try {
-    const athlete = await fetchJson(ESPN.uclAthlete(year, id), (d) => { if (!d?.displayName) throw new Error('bad athlete'); });
+    const athlete = await fetchJson(viaWorker(ESPN.uclAthlete(year, id)), (d) => { if (!d?.displayName) throw new Error('bad athlete'); });
     uclPlayerNames.set(id, athlete.displayName);
     return athlete.displayName;
   } catch (error) {
@@ -1029,7 +929,7 @@ async function uclPlayerName(year, id) {
 }
 
 async function loadUclScorers(year, teams) {
-  const data = await fetchJson(ESPN.uclLeaders(year), (d) => {
+  const data = await fetchJson(viaWorker(ESPN.uclLeaders(year)), (d) => {
     if (!Array.isArray(d?.categories)) throw new Error('Некорректный ответ лидеров ЛЧ');
   });
   const goals = data.categories.find((c) => c.name === 'goalsLeaders')?.leaders ?? [];
@@ -1072,7 +972,7 @@ function renderUclScorers(players) {
 }
 
 async function loadUcl(ctx) {
-  const data = await fetchJson(ESPN.uclStandings, (d) => {
+  const data = await fetchJson(viaWorker(ESPN.uclStandings), (d) => {
     if (!d?.children?.[0]?.standings?.entries?.length) throw new Error('Пустая таблица Лиги чемпионов');
   });
   const teams = parseUclStandings(data);
@@ -1341,14 +1241,14 @@ function openTeam(abbrev) {
   };
 
   // Расписание и статистика грузятся параллельно и независимо друг от друга
-  cachedJson(API.clubSchedule(abbrev), (d) => { if (!Array.isArray(d?.games)) throw new Error('bad schedule'); })
+  cachedJson(viaWorker(API.clubSchedule(abbrev)), (d) => { if (!Array.isArray(d?.games)) throw new Error('bad schedule'); })
     .then((data) => { if (token === modal.token) fillSchedule(team, data.games); })
     .catch((e) => {
       console.error(e);
       ['form', 'results', 'next'].forEach((s) => slotError(s, 'Не удалось загрузить расписание.'));
     });
 
-  cachedJson(API.clubStats(abbrev), (d) => { if (!Array.isArray(d?.skaters)) throw new Error('bad stats'); })
+  cachedJson(viaWorker(API.clubStats(abbrev)), (d) => { if (!Array.isArray(d?.skaters)) throw new Error('bad stats'); })
     .then((data) => { if (token === modal.token) fillLeaders(data); })
     .catch((e) => { console.error(e); slotError('leaders', 'Не удалось загрузить статистику игроков.'); });
 }
@@ -1442,7 +1342,7 @@ async function openPlayer(id, { backTo = '' } = {}) {
   showModal(loadingHtml('Загружаем карточку игрока…'));
 
   try {
-    const player = await cachedJson(API.player(id), (d) => { if (!d?.firstName) throw new Error('bad player'); });
+    const player = await cachedJson(viaWorker(API.player(id)), (d) => { if (!d?.firstName) throw new Error('bad player'); });
     if (token !== modal.token) return;       // окно уже закрыли или открыли другое
     showModal(playerHtml(player, backTo));
   } catch (error) {
@@ -1620,11 +1520,7 @@ async function refreshLeague(key, { silent = false } = {}) {
     state.updatedAt = new Date();
   } catch (error) {
     console.error(error);
-    // Тихое обновление не затирает уже показанные данные баннером ошибки
-    if (!(silent && state.loaded)) {
-      const reason = error.name === 'AbortError' ? 'Превышено время ожидания ответа.' : 'API недоступно.';
-      state.error = `${reason} Проверьте соединение и попробуйте снова.`;
-    }
+    state.error = '';
   } finally {
     state.loading = false;
     syncChrome();
