@@ -120,7 +120,7 @@ const esc = (value) =>
  * Таймстемп добавляется только к адресу прокси, чтобы обойти его кэш.
  */
 async function fetchJsonSafe(url, validate = () => {}) {
-  const options = { cache: 'no-store', headers: { 'Cache-Control': 'no-cache', 'Pragma': 'no-cache' } };
+  const options = { cache: 'no-store' };
 
   const fetchWithTimeout = async (targetUrl, timeoutMs) => {
     const controller = new AbortController();
