@@ -43,7 +43,7 @@ const STRENGTH_RU = { ev: 'равн.', pp: 'бол-во', sh: 'мен-во', en:
 
 /**
  * Источник данных для NBA и Лиги чемпионов — публичное API ESPN (ключ не нужен).
- * Запросы идут напрямую в API, а если браузер режет CORS — через corsproxy.io.
+ * Запросы идут напрямую в API, а если браузер режет CORS — через codetabs, затем allorigins.
  */
 const ESPN = {
   // Таблица НБА: season — год окончания сезона (2027 = 2026-27), seasontype=2 — регулярный сезон
@@ -64,20 +64,10 @@ const ESPN = {
 
 const LEAGUE_STORAGE_KEY = 'sportsHub.activeLeague';
 
-/**
- * Транспорт данных. Сначала прямой запрос к API и быстрый corsproxy.io
- * идут одновременно: берём тот, что ответил первым. allorigins не используем.
- * Если оба не уложились в 3.5 с — один резервный заход через proxy.cors.sh.
- */
-const PROXY_TIMEOUT_MS = 3500;
-const viaCorsProxy = (url) => `https://corsproxy.io/?url=${encodeURIComponent(url)}`;
-const viaCorsSh = (url) => `https://proxy.cors.sh/${url}`;
-
 const TOP_SCORERS_COUNT = 10;
 const AUTO_REFRESH_MS = 2 * 60 * 1000;
 /** Спиннер не должен перекрывать страницу дольше этого времени. */
 const LOADER_UNLOCK_MS = 1800;
-const NHL_CACHE_PREFIX = 'sportsHub.nhl.';
 
 /* ---------- DOM ---------- */
 
@@ -121,69 +111,63 @@ const esc = (value) =>
     { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch]
   ));
 
-/** Один адрес. Дольше 3.5 с не ждём. */
-async function fetchJsonOnce(targetUrl, signal) {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), PROXY_TIMEOUT_MS);
-  const onAbort = () => controller.abort();
-  signal?.addEventListener('abort', onAbort, { once: true });
-  try {
-    const response = await fetch(targetUrl, { signal: controller.signal });
-    if (!response.ok) throw new Error(`HTTP ${response.status}`);
-    return await response.json();
-  } catch (error) {
-    if (error?.name === 'AbortError') throw new Error(`Таймаут ${PROXY_TIMEOUT_MS / 1000} с`);
-    throw error;
-  } finally {
-    clearTimeout(timer);
-    signal?.removeEventListener('abort', onAbort);
-  }
-}
-
-/** Первый успешный ответ. Остальные попытки обрываются, чтобы не ждать медленный канал. */
-async function fetchFirstOk(urls) {
-  const stop = new AbortController();
-  try {
-    return await Promise.any(urls.map((url) => fetchJsonOnce(url, stop.signal)));
-  } finally {
-    stop.abort();
-  }
-}
-
 /**
- * JSON: прямой запрос и corsproxy.io стартуют вместе.
- * Резерв proxy.cors.sh — только если оба не ответили за 3.5 с.
- * @param {string} url исходный URL API
+ * Транспорт данных без VPN.
+ * Сервера NHL блокируют неизвестные URL параметры, поэтому обход кэша
+ * делается ИСКЛЮЧИТЕЛЬНО через заголовки fetch (cache: 'no-store').
  */
 async function fetchJsonSafe(url, validate = () => {}) {
+  const options = {
+    cache: 'no-store',
+    headers: { 'Cache-Control': 'no-cache', 'Pragma': 'no-cache' },
+  };
+
+  const fetchWithTimeout = async (targetUrl, timeoutMs) => {
+    const controller = new AbortController();
+    const id = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const res = await fetch(targetUrl, { ...options, signal: controller.signal });
+      clearTimeout(id);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      return await res.json();
+    } catch (e) {
+      clearTimeout(id);
+      throw e;
+    }
+  };
+
   try {
-    const data = await fetchFirstOk([url, viaCorsProxy(url)]);
+    // 1. Быстрый старт: прямой запрос и Codetabs параллельно (кто быстрее)
+    const data = await Promise.any([
+      fetchWithTimeout(url, 4000),
+      fetchWithTimeout(`https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(url)}`, 4000),
+    ]);
     validate(data);
     return data;
-  } catch (error) {
-    console.warn('Прямой запрос и corsproxy.io не ответили, пробуем proxy.cors.sh:', error);
-    const data = await fetchJsonOnce(viaCorsSh(url));
-    validate(data);
-    return data;
+  } catch (errorMain) {
+    try {
+      // 2. Надежный резерв: AllOrigins
+      console.warn('Основа упала, пробуем AllOrigins:', errorMain);
+      const data = await fetchWithTimeout(`https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`, 6000);
+      validate(data);
+      return data;
+    } catch (errorFallback) {
+      console.error('Все прокси недоступны для:', url);
+      throw errorFallback;
+    }
   }
 }
 
 function readNhlCache(key) {
   try {
-    const raw = localStorage.getItem(NHL_CACHE_PREFIX + key);
-    if (!raw) return null;
-    return JSON.parse(raw);
-  } catch {
-    return null;
-  }
+    const raw = localStorage.getItem('sportsHub.nhl.' + key);
+    return raw ? JSON.parse(raw) : null;
+  } catch { return null; }
 }
 
 function writeNhlCache(key, data) {
-  try {
-    localStorage.setItem(NHL_CACHE_PREFIX + key, JSON.stringify(data));
-  } catch (error) {
-    console.warn('Не удалось сохранить данные в localStorage:', error);
-  }
+  try { localStorage.setItem('sportsHub.nhl.' + key, JSON.stringify(data)); }
+  catch (e) { console.warn('Кэш переполнен или недоступен'); }
 }
 
 /** Разница шайб со знаком и цветом. */
@@ -766,20 +750,8 @@ function renderStandingsPayload(data) {
 
 /** Четыре блока главной: кэш рисуется сразу, сеть обновляет каждый по мере ответа. */
 const NHL_HOME = [
-  {
-    key: 'standings',
-    url: API.standings,
-    validate: (data) => {
-      if (!Array.isArray(data?.standings)) throw new Error('Некорректная турнирная таблица');
-    },
-  },
-  {
-    key: 'leaders',
-    url: API.leaders,
-    validate: (data) => {
-      if (!Array.isArray(data?.points)) throw new Error('Некорректный ответ бомбардиров');
-    },
-  },
+  { key: 'standings', url: API.standings },
+  { key: 'leaders', url: API.leaders },
   { key: 'ovechkin', url: API.player(OVECHKIN_ID) },
   { key: 'schedule', url: API.scoreNow },
 ];
