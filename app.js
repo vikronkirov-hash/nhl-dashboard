@@ -43,7 +43,7 @@ const STRENGTH_RU = { ev: 'равн.', pp: 'бол-во', sh: 'мен-во', en:
 
 /**
  * Источник данных для NBA и Лиги чемпионов — публичное API ESPN (ключ не нужен).
- * Запросы идут напрямую в API, а если браузер режет CORS — через codetabs, затем allorigins.
+ * Запросы идут напрямую в API, а если браузер режет CORS — через corsproxy.io, затем allorigins.
  */
 const ESPN = {
   // Таблица НБА: season — год окончания сезона (2027 = 2026-27), seasontype=2 — регулярный сезон
@@ -68,6 +68,9 @@ const TOP_SCORERS_COUNT = 10;
 const AUTO_REFRESH_MS = 2 * 60 * 1000;
 /** Спиннер не должен перекрывать страницу дольше этого времени. */
 const LOADER_UNLOCK_MS = 1800;
+const NHL_CACHE_PREFIX = 'sportsHub.nhl.v3.';
+const viaCorsProxy = (url) => `https://corsproxy.io/?url=${encodeURIComponent(url)}&_t=${Date.now()}`;
+const viaAllOrigins = (url) => `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}&_t=${Date.now()}`;
 
 /* ---------- DOM ---------- */
 
@@ -113,14 +116,11 @@ const esc = (value) =>
 
 /**
  * Транспорт данных без VPN.
- * Сервера NHL блокируют неизвестные URL параметры, поэтому обход кэша
- * делается ИСКЛЮЧИТЕЛЬНО через заголовки fetch (cache: 'no-store').
+ * К URL NHL ничего не дописываем (сервер отвечает 400).
+ * Таймстемп добавляется только к адресу прокси, чтобы обойти его кэш.
  */
 async function fetchJsonSafe(url, validate = () => {}) {
-  const options = {
-    cache: 'no-store',
-    headers: { 'Cache-Control': 'no-cache', 'Pragma': 'no-cache' },
-  };
+  const options = { cache: 'no-store', headers: { 'Cache-Control': 'no-cache', 'Pragma': 'no-cache' } };
 
   const fetchWithTimeout = async (targetUrl, timeoutMs) => {
     const controller = new AbortController();
@@ -137,36 +137,34 @@ async function fetchJsonSafe(url, validate = () => {}) {
   };
 
   try {
-    // 1. Быстрый старт: прямой запрос и Codetabs параллельно (кто быстрее)
-    const data = await Promise.any([
-      fetchWithTimeout(url, 4000),
-      fetchWithTimeout(`https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(url)}`, 4000),
-    ]);
+    // 1. Пробуем напрямую к NHL
+    const data = await fetchWithTimeout(url, 3000);
     validate(data);
     return data;
-  } catch (errorMain) {
+  } catch (e1) {
     try {
-      // 2. Надежный резерв: AllOrigins
-      console.warn('Основа упала, пробуем AllOrigins:', errorMain);
-      const data = await fetchWithTimeout(`https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`, 6000);
+      // 2. Резерв 1: быстрый corsproxy
+      const data = await fetchWithTimeout(viaCorsProxy(url), 4000);
       validate(data);
       return data;
-    } catch (errorFallback) {
-      console.error('Все прокси недоступны для:', url);
-      throw errorFallback;
+    } catch (e2) {
+      // 3. Резерв 2: allorigins
+      const data = await fetchWithTimeout(viaAllOrigins(url), 6000);
+      validate(data);
+      return data;
     }
   }
 }
 
 function readNhlCache(key) {
   try {
-    const raw = localStorage.getItem('sportsHub.nhl.' + key);
+    const raw = localStorage.getItem(NHL_CACHE_PREFIX + key);
     return raw ? JSON.parse(raw) : null;
   } catch { return null; }
 }
 
 function writeNhlCache(key, data) {
-  try { localStorage.setItem('sportsHub.nhl.' + key, JSON.stringify(data)); }
+  try { localStorage.setItem(NHL_CACHE_PREFIX + key, JSON.stringify(data)); }
   catch (e) { console.warn('Кэш переполнен или недоступен'); }
 }
 
