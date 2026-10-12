@@ -68,8 +68,8 @@ const TOP_SCORERS_COUNT = 10;
 const AUTO_REFRESH_MS = 2 * 60 * 1000;
 /** Спиннер не должен перекрывать страницу дольше этого времени. */
 const LOADER_UNLOCK_MS = 1800;
-const NHL_CACHE_PREFIX = 'sportsHub.nhl.v4.';
-const viaCorsProxy = (url) => `https://corsproxy.io/?url=${encodeURIComponent(url)}&_t=${Date.now()}`;
+const NHL_CACHE_PREFIX = 'sportsHub.nhl.v5.';
+const viaCorsProxy = (url) => `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(url)}&_t=${Date.now()}`;
 const viaAllOrigins = (url) => `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}&_t=${Date.now()}`;
 
 /* ---------- DOM ---------- */
@@ -147,7 +147,7 @@ async function fetchJsonSafe(url, validate = () => {}) {
       return data;
     } catch (e2) {
       // 3. Резерв 2: allorigins
-      const data = await fetchWithTimeout(viaAllOrigins(url), 6000);
+      const data = await fetchWithTimeout(viaAllOrigins(url), 10000);
       validate(data);
       return data;
     }
