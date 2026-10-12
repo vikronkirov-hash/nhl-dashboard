@@ -68,7 +68,7 @@ const TOP_SCORERS_COUNT = 10;
 const AUTO_REFRESH_MS = 2 * 60 * 1000;
 /** Спиннер не должен перекрывать страницу дольше этого времени. */
 const LOADER_UNLOCK_MS = 1800;
-const NHL_CACHE_PREFIX = 'sportsHub.nhl.v3.';
+const NHL_CACHE_PREFIX = 'sportsHub.nhl.v4.';
 const viaCorsProxy = (url) => `https://corsproxy.io/?url=${encodeURIComponent(url)}&_t=${Date.now()}`;
 const viaAllOrigins = (url) => `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}&_t=${Date.now()}`;
 
@@ -120,13 +120,11 @@ const esc = (value) =>
  * Таймстемп добавляется только к адресу прокси, чтобы обойти его кэш.
  */
 async function fetchJsonSafe(url, validate = () => {}) {
-  const options = { cache: 'no-store' };
-
   const fetchWithTimeout = async (targetUrl, timeoutMs) => {
     const controller = new AbortController();
     const id = setTimeout(() => controller.abort(), timeoutMs);
     try {
-      const res = await fetch(targetUrl, { ...options, signal: controller.signal });
+      const res = await fetch(targetUrl, { signal: controller.signal });
       clearTimeout(id);
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       return await res.json();
@@ -748,10 +746,26 @@ function renderStandingsPayload(data) {
 
 /** Четыре блока главной: кэш рисуется сразу, сеть обновляет каждый по мере ответа. */
 const NHL_HOME = [
-  { key: 'standings', url: API.standings },
-  { key: 'leaders', url: API.leaders },
-  { key: 'ovechkin', url: API.player(OVECHKIN_ID) },
-  { key: 'schedule', url: API.scoreNow },
+  {
+    key: 'standings',
+    url: API.standings,
+    validate: (d) => { if (!d || !Array.isArray(d.standings)) throw new Error('Bad standings'); },
+  },
+  {
+    key: 'leaders',
+    url: API.leaders,
+    validate: (d) => { if (!d || (!Array.isArray(d.points) && !Array.isArray(d.data) && !Array.isArray(d))) throw new Error('Bad leaders'); },
+  },
+  {
+    key: 'ovechkin',
+    url: API.player(OVECHKIN_ID),
+    validate: (d) => { if (!d || (!d.firstName && !d.playerId)) throw new Error('Bad player'); },
+  },
+  {
+    key: 'schedule',
+    url: API.scoreNow,
+    validate: (d) => { if (!d || (!Array.isArray(d.games) && !Array.isArray(d))) throw new Error('Bad schedule'); },
+  },
 ];
 
 /** Рисует один блок из уже полученных данных. Для standings возвращает подпись сезона. */
